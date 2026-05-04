@@ -330,29 +330,8 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
     import hashlib
     import time as _time
 
-    try:
-        from ouroboros.consciousness import BackgroundConsciousness
-        consciousness_md = safe_read(env.repo_path("prompts/CONSCIOUSNESS.md"))
-        if consciousness_md:
-            whitelist = BackgroundConsciousness._BG_TOOL_WHITELIST
-            scan_text = re.sub(r'```.*?```', '', consciousness_md, flags=re.DOTALL)
-            tool_prefixes = (
-                "schedule_", "update_", "knowledge_", "browse_", "analyze_",
-                "web_", "send_", "repo_", "data_", "chat_", "list_", "get_",
-                "wait_", "set_", "memory_",
-            )
-            prompt_tool_refs = {
-                match.group(1)
-                for match in re.finditer(r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b', scan_text)
-                if match.group(1) in whitelist or any(match.group(1).startswith(prefix) for prefix in tool_prefixes)
-            }
-            phantom = prompt_tool_refs - whitelist
-            if phantom:
-                checks.append(f"WARNING: PROMPT-RUNTIME DRIFT — CONSCIOUSNESS.md references tools not in BG whitelist: {', '.join(sorted(phantom))}")
-            else:
-                checks.append("OK: prompt-runtime sync (no phantom tools)")
-    except Exception:
-        pass
+    # nefteboros: prompt-runtime drift check (CONSCIOUSNESS.md vs BG whitelist) removed
+    # together with the consciousness module (см. ADR-0001).
 
     try:
         msg_hash_to_tasks: Dict[str, set] = {}
@@ -776,14 +755,7 @@ def build_llm_messages(
         build_runtime_section(env, task),
     ])
 
-    try:
-        from ouroboros.improvement_backlog import format_backlog_digest
-
-        backlog_digest = format_backlog_digest(env.drive_root)
-        if backlog_digest:
-            dynamic_parts.append(backlog_digest)
-    except Exception:
-        log.debug("Failed to build improvement backlog digest", exc_info=True)
+    # nefteboros: improvement backlog digest removed (см. ADR-0001).
 
     review_section = ""
     if review_context_builder is not None:

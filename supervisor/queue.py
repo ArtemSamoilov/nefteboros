@@ -91,7 +91,7 @@ def init_queue_refs(pending: List[Dict[str, Any]], running: Dict[str, Dict[str, 
 
 def _task_priority(task_type: str) -> int:
     t = str(task_type or "").strip().lower()
-    if t in ("task", "review", "deep_self_review"):
+    if t in ("task", "review"):
         return 0
     if t == "evolution":
         return 1
@@ -326,9 +326,8 @@ def enforce_task_timeouts() -> None:
             _att = task.get("_attempt")
         attempt = int(_att) if _att is not None else 1
 
-        # Deep self-review gets a longer timeout (60 min)
-        effective_soft = 3000 if task_type == "deep_self_review" else SOFT_TIMEOUT_SEC
-        effective_hard = 3600 if task_type == "deep_self_review" else HARD_TIMEOUT_SEC
+        effective_soft = SOFT_TIMEOUT_SEC
+        effective_hard = HARD_TIMEOUT_SEC
 
         if runtime_sec >= effective_soft and not bool(meta.get("soft_sent")):
             meta["soft_sent"] = True
@@ -419,25 +418,6 @@ def build_evolution_task_text(cycle: int) -> str:
     return f"EVOLUTION #{cycle}"
 
 
-def queue_deep_self_review_task(reason: str, model: str = "", force: bool = False) -> Optional[str]:
-    """Queue a deep self-review task."""
-    st = load_state()
-    owner_chat_id = st.get("owner_chat_id")
-    if not owner_chat_id:
-        return None
-    if (not force) and queue_has_task_type("deep_self_review"):
-        return None
-    tid = uuid.uuid4().hex[:8]
-    enqueue_task({
-        "id": tid,
-        "type": "deep_self_review",
-        "chat_id": int(owner_chat_id),
-        "text": reason or "Deep self-review",
-        "model": model,
-    })
-    persist_queue_snapshot(reason="deep_self_review_enqueued")
-    send_with_budget(int(owner_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})")
-    return tid
 
 
 def get_evolution_status_snapshot() -> Dict[str, Any]:

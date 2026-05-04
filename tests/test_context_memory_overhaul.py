@@ -147,43 +147,5 @@ def test_health_invariants_come_first_in_dynamic_context(tmp_path):
     assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Drive state")
 
 
-def test_health_invariants_come_first_in_background_consciousness_context(tmp_path):
-    from ouroboros.consciousness import BackgroundConsciousness
-
-    repo_dir = tmp_path / "repo"
-    drive_root = tmp_path / "drive"
-    (repo_dir / "prompts").mkdir(parents=True, exist_ok=True)
-    (repo_dir / "docs").mkdir(parents=True, exist_ok=True)
-    (drive_root / "memory" / "knowledge").mkdir(parents=True, exist_ok=True)
-    (drive_root / "logs").mkdir(parents=True, exist_ok=True)
-    (drive_root / "state").mkdir(parents=True, exist_ok=True)
-
-    (repo_dir / "prompts" / "CONSCIOUSNESS.md").write_text("Consciousness prompt", encoding="utf-8")
-    (repo_dir / "BIBLE.md").write_text("Bible", encoding="utf-8")
-    (repo_dir / "VERSION").write_text("1.2.3", encoding="utf-8")
-    (repo_dir / "pyproject.toml").write_text('version = "1.2.3"', encoding="utf-8")
-    (repo_dir / "README.md").write_text("README", encoding="utf-8")
-    (repo_dir / "docs" / "ARCHITECTURE.md").write_text("# Ouroboros v1.2.3", encoding="utf-8")
-    (repo_dir / "docs" / "DEVELOPMENT.md").write_text(
-        "### File Size Budgets\n| Path | Budget chars |\n|------|--------------|\n| memory/identity.md | 1000 |\n",
-        encoding="utf-8",
-    )
-    (drive_root / "state" / "state.json").write_text('{"spent_usd": 0, "budget_drift_alert": false}', encoding="utf-8")
-    (drive_root / "memory" / "identity.md").write_text("x" * 950, encoding="utf-8")
-    (drive_root / "memory" / "scratchpad.md").write_text("scratchpad", encoding="utf-8")
-    (drive_root / "logs" / "chat.jsonl").write_text("", encoding="utf-8")
-    (drive_root / "logs" / "progress.jsonl").write_text("", encoding="utf-8")
-    (drive_root / "logs" / "tools.jsonl").write_text("", encoding="utf-8")
-    (drive_root / "logs" / "events.jsonl").write_text("", encoding="utf-8")
-    (drive_root / "logs" / "supervisor.jsonl").write_text("", encoding="utf-8")
-    (drive_root / "logs" / "task_reflections.jsonl").write_text("", encoding="utf-8")
-
-    bg = BackgroundConsciousness(
-        drive_root=drive_root,
-        repo_dir=repo_dir,
-        event_queue=None,
-        owner_chat_id_fn=lambda: None,
-    )
-
-    text = bg._build_context()
-    assert text.index("## Health Invariants") < text.index("## Drive state")
+# nefteboros: test_health_invariants_come_first_in_background_consciousness_context
+# removed together with the consciousness module (см. ADR-0001).
