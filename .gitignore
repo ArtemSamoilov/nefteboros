@@ -1,6 +1,7 @@
 # Secrets
 .env
 .env.*
+!.env.example
 *.key
 *.pem
 
@@ -62,3 +63,37 @@ repo_bundle_manifest.json
 /jsonschema/
 /jsonschema_specifications/
 /certifi/
+
+# ============================================================================
+# nefteboros-specific (см. docs/changelog/2026-05-04-init-skeleton.md)
+# ============================================================================
+
+# Claude Code / агент-инструменты — рабочие данные не должны попадать в репо
+.claude/
+.cursor-tutor/
+
+# RAG-данные — корпус и векторстор больше git'а; список PDF — в data/metadata/
+/data/corpus/*
+!/data/corpus/.gitkeep
+/data/vectorstore/*
+!/data/vectorstore/.gitkeep
+
+# Кеш эмбеддингов
+.embeddings_cache/
+
+# Eval runs — артефакты прогонов хранятся локально, в репо только сводный dashboard
+/metrics/runs/*
+!/metrics/runs/.gitkeep
+
+# Локальные расширения датасетов — НЕ коммитим *.local.jsonl
+/datasets/*.local.*
+
+# Telegram bot session files
+*.session
+*.session-journal
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Jupyter
+.ipynb_checkpoints/

@@ -1,0 +1,42 @@
+# Доменные зависимости nefteboros (поверх ouroboros requirements.txt).
+# Устанавливаются последними в Dockerfile, чтобы не ломать ouroboros core.
+
+# --- Agent framework ---
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langgraph>=0.2.0
+langchain-openai>=0.2.0          # для Cloud.ru OpenAI-compatible
+
+# --- LLM clients ---
+gigachat>=0.1.30                  # Sber GigaChat client
+
+# --- RAG ---
+chromadb>=0.5.0
+sentence-transformers>=3.0.0      # BGE-M3 и пр.
+PyMuPDF>=1.24.0                   # парсер PDF (fitz)
+
+# --- Forecast ---
+yfinance>=0.2.40
+pandas>=2.2.0
+numpy>=1.26.0
+statsmodels>=0.14.0               # ARIMA, SARIMA, ETS
+prophet>=1.1.5                    # Facebook Prophet
+
+# --- Web search ---
+httpx>=0.27.0                     # уже в ouroboros, but pin
+tldextract>=5.1.0                 # для tier-1/tier-2 фильтра по доменам
+
+# --- Telegram bot ---
+aiogram>=3.13.0
+
+# --- UI (standalone Streamlit как опция) ---
+streamlit>=1.36.0                 # опционально, для standalone демо
+
+# --- Validation ---
+pydantic>=2.9.0
+PyYAML>=6.0                       # уже в ouroboros, но используем для metadata.yaml
+
+# --- Eval ---
+scikit-learn>=1.5.0               # для метрик (F1, confusion matrix)
+matplotlib>=3.9.0                 # для plots в forecast eval

@@ -1,0 +1,25 @@
+nefteboros — AI-агент «Нефтегазовый аналитик»
+Copyright (c) 2026 Artem Samoilov <vissarionnikiforovic@gmail.com>
+
+Данный продукт является форком Ouroboros (https://github.com/joi-lab/ouroboros-desktop),
+лицензированного под MIT License.
+
+Original Ouroboros:
+  Copyright (c) 2026 joi-lab
+  Licensed under the MIT License.
+  See docs/upstream/ для оригинальных документов upstream-проекта.
+
+nefteboros добавляет доменную логику для нефтегазового анализа:
+  - RAG-пайплайн по отраслевым отчётам (OPEC, IEA, EIA, и др.)
+  - Расчётный модуль прогнозирования цен Brent (ARIMA + Prophet)
+  - Веб-поиск через Brave API с фильтрацией источников
+  - LangGraph subgraph для логики приоритизации источников
+  - LLM-адаптеры для GigaChat и Cloud.ru Foundation Models
+  - Telegram-бот с авторизацией
+
+Удалены подсистемы upstream'а, не требуемые для доменной задачи:
+  - Self-modification (consciousness, reflection, deep_self_review)
+  - Improvement backlog, consolidator
+  - Marketplace, A2A protocol
+
+Подробнее: docs/adr/0001-fork-ouroboros.md
