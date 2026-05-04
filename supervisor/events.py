@@ -305,13 +305,6 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
         log.debug("Failed to forward task_metrics to live logs", exc_info=True)
 
 
-def _handle_deep_self_review_request(evt: Dict[str, Any], ctx: Any) -> None:
-    ctx.queue_deep_self_review_task(
-        reason=str(evt.get("reason") or "agent_self_review"),
-        model=str(evt.get("model") or ""),
-    )
-
-
 def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
     import subprocess as sp
     # Local branch promotion (always works)
@@ -526,24 +519,6 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.send_with_budget(int(st["owner_chat_id"]), f"🧬 Evolution: {state_str} (via agent tool)")
 
 
-def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
-    """Toggle background consciousness from LLM tool call."""
-    from supervisor.state import update_state
-    action = str(evt.get("action") or "status")
-    if action in ("start", "on"):
-        result = ctx.consciousness.start()
-        update_state(lambda st: st.__setitem__("bg_consciousness_enabled", True))
-    elif action in ("stop", "off"):
-        result = ctx.consciousness.stop()
-        update_state(lambda st: st.__setitem__("bg_consciousness_enabled", False))
-    else:
-        status = "running" if ctx.consciousness.is_running else "stopped"
-        result = f"Background consciousness: {status}"
-    st = ctx.load_state()
-    if st.get("owner_chat_id"):
-        ctx.send_with_budget(int(st["owner_chat_id"]), f"🧠 {result}")
-
-
 def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
     """Send a photo to the owner's chat."""
     import base64 as b64mod
@@ -627,13 +602,11 @@ EVENT_HANDLERS = {
     "send_message": _handle_send_message,
     "task_done": _handle_task_done,
     "task_metrics": _handle_task_metrics,
-    "deep_self_review_request": _handle_deep_self_review_request,
     "promote_to_stable": _handle_promote_to_stable,
     "schedule_task": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
     "toggle_evolution": _handle_toggle_evolution,
-    "toggle_consciousness": _handle_toggle_consciousness,
     "owner_message_injected": _handle_owner_message_injected,
     "log_event": _handle_log_event,
 }

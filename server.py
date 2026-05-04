@@ -378,46 +378,15 @@ _supervisor_ready = threading.Event()
 _supervisor_error: Optional[str] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 _supervisor_thread: Optional[threading.Thread] = None
-_consciousness: Any = None
 
 
 def _describe_bg_consciousness_state(requested_enabled: bool) -> dict:
-    snapshot = _consciousness.status_snapshot() if _consciousness else {}
-    running = bool(snapshot.get("running"))
-    paused = bool(snapshot.get("paused"))
-    next_wakeup_sec = int(snapshot.get("next_wakeup_sec") or 0)
-    idle_reason = str(snapshot.get("last_idle_reason") or "")
-    detail = "Background consciousness is off."
-    status = "disabled"
-
-    if requested_enabled and running and paused:
-        status = "paused"
-        detail = "Paused while another foreground task is active."
-    elif requested_enabled and running and idle_reason == "thinking":
-        status = "running"
-        detail = "Background consciousness is thinking now."
-    elif requested_enabled and running and idle_reason == "budget_blocked":
-        status = "budget_blocked"
-        detail = "Background consciousness hit its budget allocation and is waiting."
-    elif requested_enabled and running:
-        status = "running"
-        detail = (
-            f"Background consciousness is idle between wakeups."
-            + (f" Next wakeup in {next_wakeup_sec}s." if next_wakeup_sec > 0 else "")
-        )
-    elif requested_enabled:
-        status = "stopped"
-        detail = "Enabled in state, but the background thread is not running."
-
-    if idle_reason == "error_backoff" and snapshot.get("last_error"):
-        status = "error_backoff"
-        detail = f"Waiting to retry after an internal error: {snapshot['last_error']}"
-
+    # nefteboros: BackgroundConsciousness removed (см. ADR-0001).
+    # Always returns disabled — UI compatibility shim.
     return {
-        "enabled": requested_enabled,
-        "status": status,
-        "detail": detail,
-        **snapshot,
+        "enabled": False,
+        "status": "disabled",
+        "detail": "Background consciousness disabled in nefteboros fork (см. ADR-0001).",
     }
 
 
@@ -493,7 +462,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         lowered = text.strip().lower()
         if lowered.startswith("/panic"):
             ctx.send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
-            _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
+            _execute_panic_stop(None, ctx.kill_workers)
         elif lowered.startswith("/restart"):
             ctx.send_with_budget(chat_id, "♻️ Restarting.")
             ok, restart_msg = ctx.safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
@@ -537,12 +506,8 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 log.warning("Failed to send owner restart stop notice; continuing restart", exc_info=True)
             _request_restart_exit()
         elif lowered == "/review" or lowered.startswith("/review "):
-            # Only ``/review`` (with no suffix) or ``/review <args>``
-            # maps to deep_self_review. The slash-commands ``/review-skill``
-            # and any future ``/review-*`` flow through the agent's
-            # normal chat pipeline so they can route to their own
-            # tools.
-            ctx.queue_deep_self_review_task(reason="owner:/review", force=True)
+            # nefteboros: deep_self_review removed (см. ADR-0001).
+            ctx.send_with_budget(chat_id, "ℹ️ /review (deep self-review) disabled in nefteboros fork.")
         elif lowered.startswith("/evolve"):
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "on"
@@ -558,23 +523,8 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 ctx.persist_queue_snapshot(reason="evolve_off")
             ctx.send_with_budget(chat_id, f"🧬 Evolution: {'ON' if turn_on else 'OFF'}")
         elif lowered.startswith("/bg"):
-            parts = lowered.split()
-            action = parts[1] if len(parts) > 1 else "status"
-            if action in ("start", "on", "1"):
-                result = ctx.consciousness.start()
-                _bg_s = ctx.load_state()
-                _bg_s["bg_consciousness_enabled"] = True
-                ctx.save_state(_bg_s)
-                ctx.send_with_budget(chat_id, f"🧠 {result}")
-            elif action in ("stop", "off", "0"):
-                result = ctx.consciousness.stop()
-                _bg_s = ctx.load_state()
-                _bg_s["bg_consciousness_enabled"] = False
-                ctx.save_state(_bg_s)
-                ctx.send_with_budget(chat_id, f"🧠 {result}")
-            else:
-                bg_status = "running" if ctx.consciousness.is_running else "stopped"
-                ctx.send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
+            # nefteboros: BackgroundConsciousness removed (см. ADR-0001).
+            ctx.send_with_budget(chat_id, "ℹ️ /bg (background consciousness) disabled in nefteboros fork.")
         elif lowered.startswith("/status"):
             from supervisor.state import status_text
             from supervisor.queue import SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
@@ -582,21 +532,13 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
             ctx.send_with_budget(chat_id, status, force_budget=True)
         else:
-            ctx.consciousness.inject_observation(f"Owner message: {log_text}")
+            # nefteboros: consciousness.inject_observation/pause/resume removed (см. ADR-0001).
             agent = ctx.get_chat_agent()
             if agent._busy:
                 agent.inject_message(text or image_caption, image_data=image_data)
             else:
-                ctx.consciousness.pause()
-
-                def _run_and_resume(cid, txt, img):
-                    try:
-                        ctx.handle_chat_direct(cid, txt, img)
-                    finally:
-                        ctx.consciousness.resume()
-
                 threading.Thread(
-                    target=_run_and_resume,
+                    target=ctx.handle_chat_direct,
                     args=(chat_id, text or image_caption, image_data),
                     daemon=True,
                 ).start()
@@ -649,7 +591,7 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
 
 def _run_supervisor(settings: dict) -> None:
     """Initialize and run the supervisor loop. Called in a background thread."""
-    global _supervisor_error, _supervisor_thread, _consciousness
+    global _supervisor_error, _supervisor_thread
 
     _apply_settings_to_env(settings)
 
@@ -683,7 +625,7 @@ def _run_supervisor(settings: dict) -> None:
         from supervisor.queue import (
             enqueue_task, enforce_task_timeouts, enqueue_evolution_task_if_needed,
             persist_queue_snapshot, restore_pending_from_snapshot,
-            cancel_task_by_id, queue_deep_self_review_task, sort_pending,
+            cancel_task_by_id, sort_pending,
         )
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
@@ -711,7 +653,7 @@ def _run_supervisor(settings: dict) -> None:
 
         from supervisor.events import dispatch_event
         from supervisor.message_bus import send_with_budget
-        from ouroboros.consciousness import BackgroundConsciousness
+        # nefteboros: BackgroundConsciousness removed (см. ADR-0001).
         import types
         import queue as _queue_mod
 
@@ -736,15 +678,7 @@ def _run_supervisor(settings: dict) -> None:
             except Exception:
                 return None
 
-        _consciousness = BackgroundConsciousness(
-            drive_root=DATA_DIR, repo_dir=REPO_DIR,
-            event_queue=get_event_q(), owner_chat_id_fn=_get_owner_chat_id,
-        )
-
-        _bg_st = load_state()
-        if _bg_st.get("bg_consciousness_enabled"):
-            _consciousness.start()
-            log.info("Background consciousness auto-restored from saved state.")
+        # nefteboros: BackgroundConsciousness removed (см. ADR-0001).
 
         branch_dev, branch_stable = _runtime_branch_defaults()
         _event_ctx = types.SimpleNamespace(
@@ -755,16 +689,15 @@ def _run_supervisor(settings: dict) -> None:
             send_with_budget=send_with_budget, load_state=load_state, save_state=save_state,
             update_budget_from_usage=update_budget_from_usage, append_jsonl=append_jsonl,
             enqueue_task=enqueue_task, cancel_task_by_id=cancel_task_by_id,
-            queue_deep_self_review_task=queue_deep_self_review_task, persist_queue_snapshot=persist_queue_snapshot,
+            persist_queue_snapshot=persist_queue_snapshot,
             safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
-            sort_pending=sort_pending, consciousness=_consciousness,
+            sort_pending=sort_pending,
             soft_timeout=soft_timeout, hard_timeout=hard_timeout,
             get_chat_agent=_get_chat_agent, handle_chat_direct=handle_chat_direct,
             request_restart=_request_restart_exit,
         )
     except Exception as exc:
         _supervisor_error = f"Supervisor init failed: {exc}"
-        _consciousness = None
         log.critical("Supervisor initialization failed", exc_info=True)
         _supervisor_ready.set()
         _supervisor_thread = None

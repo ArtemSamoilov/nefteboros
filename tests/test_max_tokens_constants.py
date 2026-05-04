@@ -21,16 +21,8 @@ def test_scope_review_max_tokens():
     assert _SCOPE_MAX_TOKENS >= 100_000
 
 
-def test_reflection_generate_max_tokens():
-    """reflection.py generate_reflection must use ≥4096 max_tokens."""
-    src = open("ouroboros/reflection.py", encoding="utf-8").read()
-    assert "max_tokens=4096" in src
-
-
-def test_consciousness_max_tokens():
-    """consciousness.py _think must use ≥4096 max_tokens."""
-    src = open("ouroboros/consciousness.py", encoding="utf-8").read()
-    assert "max_tokens=4096" in src
+# nefteboros: test_reflection_generate_max_tokens and test_consciousness_max_tokens
+# removed together with their modules (см. ADR-0001).
 
 
 def test_compaction_max_tokens():
@@ -105,33 +97,8 @@ def test_plan_review_budget_limit():
     )
 
 
-def test_deep_self_review_budget_limit():
-    """deep_self_review.py pack-size gate must match the unified 850K budget
-    and must gate on the FULL assembled prompt (system + user), not just the pack.
-
-    The deep self-review runner rejects packs whose shared estimate_tokens
-    (chars/4) estimate exceeds the gate. This test pins the numeric threshold,
-    the use of the shared helper, AND the requirement that the gate reflects
-    the full assembled prompt — matching how scope_review and plan_review gate.
-    """
-    import pathlib
-    src = pathlib.Path("ouroboros/deep_self_review.py").read_text(encoding="utf-8")
-    assert "estimated_tokens > 850_000" in src, (
-        "deep_self_review must gate on estimated_tokens > 850_000"
-    )
-    assert "Maximum is ~850,000 tokens" in src, (
-        "deep_self_review error message must reference 850,000 tokens"
-    )
-    assert "estimate_tokens(_SYSTEM_PROMPT + pack_text)" in src, (
-        "deep_self_review must gate on the FULL assembled prompt "
-        "(system + user) using the shared estimate_tokens(chars/4) helper, "
-        "matching scope_review and plan_review. Gating on pack_text alone "
-        "understates the real request size."
-    )
-    assert "int(stats[\"total_chars\"] / 3.5)" not in src, (
-        "deep_self_review must not use its old chars/3.5 estimator — it diverges "
-        "from the scope/plan review chars/4 budget at the same nominal token gate"
-    )
+# nefteboros: test_deep_self_review_budget_limit removed together with the module
+# (см. ADR-0001).
 
 
 def test_tool_timeout_uses_max_of_settings_and_per_tool():
