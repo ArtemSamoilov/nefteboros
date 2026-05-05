@@ -1,0 +1,15 @@
+# Зависимости для PDF → Markdown конвертации (Marker).
+#
+# Используется только при запуске scripts/convert_corpus.py — на машине с GPU.
+# На сервере деплоя НЕ устанавливается: рантайм-агент работает с уже собранной
+# Chroma (data/vectorstore/), а не с MD/PDF.
+#
+# Установка PyTorch — отдельной командой под backend:
+#   CUDA:           pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   Apple Silicon:  pip install torch
+#   CPU only:       pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# См. docs/adr/0010-pdf-to-markdown-marker.md.
+
+marker-pdf>=1.5.0
+PyYAML>=6.0
