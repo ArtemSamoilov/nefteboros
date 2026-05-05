@@ -1,0 +1,508 @@
+# =============================================================================
+# nefteboros — RAG corpus manifest
+# =============================================================================
+#
+# Curated source set for the «нефтегазовый аналитик» agent.
+# Use case: ассистент для топ-менеджмента Сбера, фокус — РФ-периметр + global
+# benchmarks. Дедлайн ТЗ — 2026-05-12.
+#
+# Структура (4 блока):
+#   1_strategy       — стратегические документы и долгосрочные видения (государственные / институциональные)
+#   2_corporate      — операционная картина крупнейших компаний РФ (annual + IFRS)
+#   3_operational    — свежий operational срез глобального рынка (monthly/quarterly)
+#   4_geopolitics    — тематические обзоры по санкциям/геополитике
+#
+# Все документы — бесплатные / open-access. Скачивание — `python scripts/fetch_corpus.py`.
+#
+# Связанные артефакты:
+#   - ADR-0009: docs/adr/0009-corpus-strategy.md
+#   - Changelog: docs/changelog/2026-05-05-corpus-bootstrap.md
+# =============================================================================
+
+version: 1
+generated: 2026-05-05
+total_documents: 25
+# Размеры — см. итоговый dump в docs/changelog/2026-05-05-corpus-bootstrap.md
+# (downloaded: 25, manual_pending: 0)
+
+documents:
+
+  # ===========================================================================
+  # БЛОК 1 — СТРАТЕГИИ И ВИДЕНИЯ
+  # ===========================================================================
+
+  - id: gov_rf_energostrategy_2050
+    title: Энергетическая стратегия Российской Федерации до 2050 года
+    publisher: Правительство РФ
+    publisher_country: RU
+    language: ru
+    block: 1_strategy
+    type: government_strategy
+    date: "2025-04-12"
+    url: http://static.government.ru/media/files/LWYfSENa10uBrrBoyLQqAAOj5eJYlA60.pdf
+    file: gov_rf_energostrategy_2050_2025-04.pdf
+    size_bytes: 1010096
+    sha256: 6ef97089cde568a1a4c5cd64a00274753d18afbeea2abfd5cf7f20044010e6e6
+    tags: [russia, strategy, oil, gas, long_term, government]
+    purpose: >-
+      Утверждена Распоряжением Правительства РФ № 908-р от 12.04.2025.
+      Целевые показатели добычи/экспорта нефти/газа РФ до 2050 года, три этапа.
+      Фундаментальный документ российского долгосрочного контекста.
+
+  - id: inei_ras_prognoz_2024
+    title: Прогноз развития энергетики мира и России 2024
+    publisher: ИНЭИ РАН
+    publisher_country: RU
+    language: ru
+    block: 1_strategy
+    type: institutional_forecast
+    date: "2024"
+    url: https://www.eriras.ru/files/prognoz-2024.pdf
+    file: inei_ras_prognoz_2024.pdf
+    size_bytes: 12036320
+    sha256: d99ea6f82b460b99335eb678d22318becf07a032fb0650af33c0f3b19148ef3a
+    tags: [russia, world, forecast, oil, gas, electricity, scenarios]
+    purpose: >-
+      Научный долгосрочный прогноз российской энергетики до 2050 года в трёх сценариях.
+      Главный российский институциональный взгляд (комплементарен Энергостратегии — она
+      целевая, ИНЭИ — аналитический).
+
+  - id: minec_rf_ser_2026-2028
+    title: Прогноз социально-экономического развития РФ на 2026 год и плановый период 2027-2028
+    publisher: Минэкономразвития РФ
+    publisher_country: RU
+    language: ru
+    block: 1_strategy
+    type: government_macro_forecast
+    date: "2025-09-26"
+    url: https://www.economy.gov.ru/material/file/bc142016f6ab3772370bb0b4541fc778/prognoz_socialno_ekonomicheskogo_razvitiya_rf_2026-2028.pdf
+    file: minec_rf_ser_2026-2028.pdf
+    size_bytes: 1111872
+    sha256: 524b9c6f0ee18e9f6c60f52055476c913085aeb89c20a3471384e8e1c5aa7188
+    tags: [russia, macro, oil_price, budget, gdp, government]
+    purpose: >-
+      Официальный макропрогноз. Цены нефти Urals/Brent в основе бюджета РФ,
+      курс рубля, ВВП, инфляция — то, на чём строятся финансовые модели Сбера.
+
+  - id: opec_woo_2025
+    title: OPEC World Oil Outlook 2025 (full)
+    publisher: OPEC
+    language: en
+    block: 1_strategy
+    type: institutional_forecast
+    date: "2025"
+    url: https://publications.opec.org/woo/Download
+    file: opec_woo_2025.pdf
+    size_bytes: 13443724
+    sha256: 16db1d83755833107ce12bfbcc6fcac6afdba7a58d81514051db1d7604b8ee62
+    fetch_note: >-
+      Скачано вручную через https://publications.opec.org/woo/Download
+      (требует бесплатной регистрации).
+    tags: [opec, world, forecast, oil, long_term]
+    purpose: >-
+      Главный долгосрочный прогноз OPEC до 2050 (производительская перспектива,
+      контрапункт IEA Oil потребительской стороны). Свежая версия 2025.
+
+  - id: opec_annual_report_2024
+    title: OPEC Annual Report 2024
+    publisher: OPEC
+    language: en
+    block: 1_strategy
+    type: institutional_yearbook
+    date: "2024"
+    url: https://www.opec.org/assets/assetdb/annual-report-2024.pdf
+    file: opec_annual_report_2024.pdf
+    size_bytes: 2958116
+    sha256: 45f6fb305affd3c9483f4eb4ddf660260ebd53b081afef4af625753839638b76
+    tags: [opec, world, oil, opec_plus, market_review]
+    purpose: >-
+      Годовой отчёт OPEC: рыночный обзор, политика OPEC+, ключевые тезисы 2024.
+      Частичная замена недоступному WOO full.
+
+  - id: opec_asb_2024
+    title: OPEC Annual Statistical Bulletin 2024
+    publisher: OPEC
+    language: en
+    block: 1_strategy
+    type: statistical_reference
+    date: "2024"
+    url: https://www.opec.org/assets/assetdb/asb-2024.pdf
+    file: opec_asb_2024.pdf
+    size_bytes: 6900550
+    sha256: 0bc89dde6dd87059750d9685c1d74d369238358ac1e199acd4b40a50fe9a9db8
+    tags: [opec, statistics, oil, reserves, production, exports]
+    purpose: >-
+      Reference book: исторические серии по странам OPEC и miteliance — добыча,
+      экспорт, запасы, мощности. Аналог EI Statistical Review со стороны OPEC.
+
+  - id: iea_oil_2025
+    title: IEA Oil 2025 — Analysis and forecast to 2030
+    publisher: IEA
+    language: en
+    block: 1_strategy
+    type: institutional_forecast
+    date: "2025"
+    url: https://iea.blob.core.windows.net/assets/c0087308-f434-4284-b5bb-bfaf745c81c3/Oil2025.pdf
+    file: iea_oil_2025.pdf
+    size_bytes: 4964211
+    sha256: 6f0845889562d5a31ca9a0ff1dcdcde57e43aba03c672ccb99e8b2b9ec12c051
+    tags: [iea, world, oil, medium_term, forecast]
+    purpose: >-
+      Medium-term oil outlook 2025-2030. Единственный полный IEA Oil-отчёт в open
+      access (OMR за paywall с 2020).
+
+  - id: iea_gas_2025
+    title: IEA Gas 2025 — Analysis and forecasts to 2030
+    publisher: IEA
+    language: en
+    block: 1_strategy
+    type: institutional_forecast
+    date: "2025"
+    url: https://iea.blob.core.windows.net/assets/a281016b-edb9-4ba5-8114-57af264db8be/Gas2025.pdf
+    file: iea_gas_2025.pdf
+    size_bytes: 7044052
+    sha256: d25d4ff817909728f6ad4b2ed348ad34d44b80bb01d30060d432063077bbabf9
+    tags: [iea, world, gas, lng, medium_term, forecast]
+    purpose: >-
+      Medium-term gas outlook 2025-2030 — global balances, регионы, СПГ-flow,
+      политика, сценарии для Европы и Азии.
+
+  - id: giignl_lng_2025
+    title: GIIGNL World LNG Report 2025
+    publisher: GIIGNL (International Group of LNG Importers)
+    language: en
+    block: 1_strategy
+    type: industry_yearbook
+    date: "2025-06-10"
+    url: https://files.elfsightcdn.com/eafe4a4d-3436-495d-b748-5bdce62d911d/5a159954-fafb-4af9-a613-dca88e2a1736/GIIGNL-Livre-2025-20250610.pdf
+    url_alts:
+      - https://giignl.org/wp-content/uploads/2025/05/GIIGNL-2025-Annual-Report-.pdf
+    file: giignl_lng_2025.pdf
+    size_bytes: 5890801
+    sha256: 688ee7579dd32e3b0981b32190451ec8f679f998e78747456334e472479a1f6c
+    tags: [lng, world, trade, importers, exporters]
+    purpose: >-
+      Главный отраслевой отчёт по СПГ — потоки, импортёры/экспортёры, terminals,
+      контрактная структура. Critical для российского контекста (Новатэк).
+
+  - id: eu_repower_2025-10_com637
+    title: REPowerEU — 3 years on (Communication COM(2025) 637 final)
+    publisher: European Commission
+    language: en
+    block: 1_strategy
+    type: government_strategy
+    date: "2025-10-08"
+    url: https://commission.europa.eu/document/download/81dd7c71-7b75-4b2a-8323-fb7b4326fa16_en?filename=COM_2025_637_1_EN_ACT_part1_v4.pdf
+    file: eu_repower_2025-10_com637.pdf
+    size_bytes: 2608129
+    sha256: 92fc56184409ba17a5c99a45864b882604bf3f7933433125308d4ba7c8fecb8e
+    tags: [eu, gas, oil, sanctions, russia, energy_security]
+    purpose: >-
+      Официальный отчёт Еврокомиссии о ходе отказа от российских fossil fuels.
+      Critical для оценки будущего экспорта Газпрома (зависимость EU от RU-газа
+      падала с 45% до 12% в 2025).
+
+  # ===========================================================================
+  # БЛОК 2 — КОРПОРАТИВКА РФ (свежие AR + IFRS)
+  # ===========================================================================
+
+  - id: gazprom_ar_2024
+    title: Газпром — Годовой отчёт 2024
+    publisher: ПАО «Газпром»
+    publisher_country: RU
+    language: ru
+    block: 2_corporate
+    type: annual_report
+    date: "2025"
+    url: https://www.gazprom.ru/f/posts/44/479056/gazprom-annual-report-2024-ru.pdf
+    file: gazprom_ar_2024.pdf
+    size_bytes: 8939036
+    sha256: 2a1a3b4dd0e20f22a57f9568a665807aa475f07194f3887ab657c521eea8142c
+    fetch_note: >-
+      С не-РФ IP source отдаёт SSL timeout. Скачивать с VPN РФ —
+      см. scripts/fetch_corpus_manual.sh.
+    tags: [russia, gazprom, gas, exports, annual_report]
+    purpose: >-
+      Главный российский газовый игрок — производство, экспорт по направлениям
+      (ЕС/Турция/Китай/СНГ), инфраструктура. Ключевой кредит-клиент Сбера.
+
+  - id: gazprom_accounting_2024
+    title: Газпром — Бухгалтерская (РСБУ) отчётность 2024
+    publisher: ПАО «Газпром»
+    publisher_country: RU
+    language: ru
+    block: 2_corporate
+    type: financial_report
+    date: "2025"
+    url: https://www.gazprom.ru/f/posts/44/479056/gazprom-accounting-report-2024.pdf
+    file: gazprom_accounting_2024.pdf
+    size_bytes: 4463539
+    sha256: 7c47c7a583c6e27813bf42e035da96d2c792f6846890bdb8fee1ee2836414b23
+    tags: [russia, gazprom, financial, rsbu]
+    purpose: >-
+      Бухгалтерская отчётность по РСБУ — Газпром не публикует МСФО с 2022,
+      это единственный финансовый источник.
+
+  - id: rosneft_ar_2024
+    title: Роснефть — Годовой отчёт 2024
+    publisher: ПАО «НК Роснефть»
+    publisher_country: RU
+    language: ru
+    block: 2_corporate
+    type: annual_report
+    date: "2025-06-30"
+    url: https://www.rosneft.ru/upload/site1/document_file/a_report_2024.pdf
+    file: rosneft_ar_2024.pdf
+    size_bytes: 22241186
+    sha256: 5b96144dee6d36d9ba9e1f59f7131ea443994488487a2feea650f3037fdb0dad
+    tags: [russia, rosneft, oil, refining, annual_report]
+    purpose: >-
+      Крупнейший российский нефтяной добытчик — операционка, инвестпроекты
+      (Восток Ойл, Роспан), стратегия.
+
+  - id: rosneft_ifrs_12m_2024
+    title: Роснефть — Консолидированная финансовая отчётность по МСФО за 12 мес. 2024
+    publisher: ПАО «НК Роснефть»
+    publisher_country: RU
+    language: ru
+    block: 2_corporate
+    type: financial_report
+    date: "2025"
+    url: https://www.rosneft.ru/upload/site1/12m2024_RUS.pdf
+    file: rosneft_ifrs_12m_2024.pdf
+    size_bytes: 2007381
+    sha256: 9b67d37c718ac132a63e085d70ac0b06326302d811791d701d867b99fb728c5f
+    tags: [russia, rosneft, financial, ifrs]
+    purpose: >-
+      Полная финансовая картина: P&L, баланс, cash flow. Опровергает популярное
+      мнение «Роснефть не публикует МСФО post-2022» — публикует.
+
+  - id: lukoil_ar_2024
+    title: Лукойл — Годовой отчёт 2024
+    publisher: ПАО «Лукойл»
+    publisher_country: RU
+    language: ru
+    block: 2_corporate
+    type: annual_report
+    date: "2025"
+    url: https://www.e-disclosure.ru/portal/FileLoad.ashx?Fileid=1881000
+    file: lukoil_ar_2024.pdf
+    size_bytes: 1750268
+    sha256: 5797bd846b8e5c68304ec6e077127172af6e6e12f0946be368034729ef202020
+    tags: [russia, lukoil, oil, refining, annual_report]
+    purpose: >-
+      Второй по размеру РФ-нефтяник, сильный downstream, дивидендная история.
+      Полная МСФО + операционка.
+
+  - id: novatek_ar_2024
+    title: Новатэк — Годовой отчёт 2024
+    publisher: ПАО «Новатэк»
+    publisher_country: RU
+    language: ru
+    block: 2_corporate
+    type: annual_report
+    date: "2025-02-12"
+    url: https://www.novatek.ru/common/upload/doc/NOVATEK_AR24_RU.pdf
+    file: novatek_ar_2024.pdf
+    size_bytes: 12620041
+    sha256: 07a9e738f705fae03a4e40ed1c7c1b2b107dd35adbfca8db3a7e8fc51b78d6d2
+    tags: [russia, novatek, gas, lng, annual_report, arctic_lng_2]
+    purpose: >-
+      Главный российский СПГ-игрок — Ямал СПГ, Арктик СПГ-2 (под санкциями США
+      с ноября 2023), Мурманский СПГ. Стратегия диверсификации экспорта.
+
+  - id: tatneft_ar_2024
+    title: Татнефть — Годовой отчёт 2024
+    publisher: ПАО «Татнефть» им. В.Д. Шашина
+    publisher_country: RU
+    language: ru
+    block: 2_corporate
+    type: annual_report
+    date: "2025-04-09"
+    url: https://www.tatneft.ru/uploads/publications/682f3cf820a09408542139.pdf
+    file: tatneft_ar_2024.pdf
+    size_bytes: 1880497
+    sha256: 9ca7845a3fe3cda94d85df20b2de9cd7c74b42cac8fcef8f44b2244ebfd73388
+    tags: [russia, tatneft, oil, refining, annual_report, tatarstan]
+    purpose: >-
+      Региональный игрок (Татарстан), крепкий downstream (ТАНЕКО), пример
+      «средней» нефтяной компании РФ.
+
+  # ===========================================================================
+  # БЛОК 3 — ОПЕРАЦИОННЫЙ СРЕЗ ГЛОБАЛЬНОГО РЫНКА
+  # ===========================================================================
+
+  - id: ief_momr_comparative_2026-04
+    title: IEF Comparative Analysis of Monthly Oil Reports — April 2026
+    publisher: International Energy Forum
+    language: en
+    block: 3_operational
+    type: market_digest
+    date: "2026-04"
+    url: https://www.ief.org/_resources/files/news/comparative-analysis-of-monthly-reports-on-the-oil-market/april-2026/ief-comparative-analysis-04-2026.pdf
+    file: ief_momr_comparative_2026-04.pdf
+    size_bytes: 3564496
+    sha256: 4da58960ea94777c6c8348079fd52e901bbeccc5ccbfb574343b88e5b2070a92
+    tags: [world, oil, balances, opec, iea, eia, comparative]
+    purpose: >-
+      Cравнение OPEC MOMR + IEA OMR + EIA STEO в одном документе. Замена недоступному
+      MOMR за Cloudflare-стеной — даже лучше, потому что даёт три взгляда сразу.
+
+  - id: iea_omr_2026-04_free
+    title: IEA Oil Market Report — April 2026 (free version)
+    publisher: IEA
+    language: en
+    block: 3_operational
+    type: market_report
+    date: "2026-04-14"
+    url: https://iea.blob.core.windows.net/assets/515f3128-df1a-4d6c-beb4-fd91d2434bef/-14APR2026_OilMarketReport_Free_version1.pdf
+    file: iea_omr_2026-04_free.pdf
+    size_bytes: 3141863
+    sha256: 680ce4e21d502b5434897ee71e84a76c7a2c18a176edc2a955b698579ac840de
+    tags: [iea, world, oil, monthly, balances]
+    purpose: >-
+      Бесплатная версия OMR (full за paywall с 2020) — содержит ключевые балансы
+      и тезисы IEA на текущий месяц.
+
+  - id: iea_gas_market_2026-q1
+    title: IEA Gas Market Report Q1-2026
+    publisher: IEA
+    language: en
+    block: 3_operational
+    type: market_report
+    date: "2026-Q1"
+    url: https://iea.blob.core.windows.net/assets/f746c0aa-03f3-47ba-a0d9-b45c3c758150/GasMarketReport,Q1-2026.pdf
+    file: iea_gas_market_2026-q1.pdf
+    size_bytes: 4018181
+    sha256: 22be3f0538654573a9ee516e5c1f5fd9435b2326c01e34f7e9b3331a0dee6418
+    tags: [iea, world, gas, lng, quarterly]
+    purpose: >-
+      Свежий operational digest по глобальному газу/СПГ — балансы, цены TTF/JKM/HH,
+      региональные обзоры. Газовый аналог OPEC MOMR.
+
+  - id: eia_steo_2026-04
+    title: EIA Short-Term Energy Outlook — April 2026
+    publisher: U.S. Energy Information Administration
+    language: en
+    block: 3_operational
+    type: market_report
+    date: "2026-04"
+    url: https://www.eia.gov/outlooks/steo/pdf/steo_full.pdf
+    file: eia_steo_2026-04.pdf
+    size_bytes: 4655654
+    sha256: 3d3f0a6af81eee43c8d5201ab65d75d54c62f71617f05f5ffad3ba6ba5f19b92
+    tags: [eia, us, world, oil, gas, short_term, forecast]
+    purpose: >-
+      Краткосрочный прогноз цен/добычи/потребления на 12-18 месяцев. US-фокус,
+      но global summary тоже.
+
+  - id: ei_statistical_review_2025
+    title: Statistical Review of World Energy 2025 (74th edition)
+    publisher: Energy Institute (in collaboration with KPMG)
+    language: en
+    block: 3_operational
+    type: statistical_reference
+    date: "2025-06-26"
+    url: https://assets.kpmg.com/content/dam/kpmg/sk/pdf/2025/Statistical-Review-of-World-Energy-2025.pdf
+    url_alts:
+      - https://www.energyinst.org/__data/assets/pdf_file/0007/1658077/Statistical-Review-of-World-Energy.pdf
+    file: ei_statistical_review_2025.pdf
+    size_bytes: 5409002
+    sha256: 95732ea8ad6d15e368f3b8cd040104844a997df2e0c8559ac250452cb4a8fdf0
+    tags: [world, statistics, oil, gas, coal, electricity, history]
+    purpose: >-
+      Reference book #1 в индустрии: исторические серии 1965+ по добыче/потреблению/
+      торговле/ценам/запасам по всем странам и энергоносителям. Бывший BP Stat Review.
+
+  # ===========================================================================
+  # БЛОК 4 — ГЕОПОЛИТИКА И САНКЦИИ
+  # ===========================================================================
+
+  - id: bruegel_wp_2025-32_oil_sanctions
+    title: "Bruegel Working Paper 32/2025 — Russian oil sanctions and price cap"
+    publisher: Bruegel
+    language: en
+    block: 4_geopolitics
+    type: think_tank_paper
+    date: "2025-12-18"
+    url: https://www.bruegel.org/sites/default/files/2025-12/WP%2032_1.pdf
+    file: bruegel_wp_2025-32_oil_sanctions.pdf
+    size_bytes: 987501
+    sha256: 3e22c40a60bfcc9293b5ed57752ebb9999889ae64007fd26beb3211b418845b9
+    tags: [russia, sanctions, oil, price_cap, embargo, eu]
+    purpose: >-
+      Глубокий анализ G7 oil price cap и EU embargo: эффективность, эволюция
+      от $60 к $47.60 (сент. 2025), механизм автокоррекции для EU.
+
+  - id: crs_iran_hormuz_2026
+    title: "CRS — Iran Conflict and the Strait of Hormuz: Impacts on Oil, Gas, Other Commodities"
+    publisher: U.S. Congressional Research Service
+    language: en
+    block: 4_geopolitics
+    type: research_briefing
+    date: "2026"
+    url: https://www.congress.gov/crs_external_products/R/PDF/R45281/R45281.6.pdf
+    file: crs_iran_hormuz_2026.pdf
+    size_bytes: 902041
+    sha256: 6000a9d6bc31f78bffeb4c9d345cf56f7a8bbb4f68b8f610f43be4aec482186d
+    tags: [iran, oil, gas, hormuz, geopolitics, conflict]
+    purpose: >-
+      Анализ влияния конфликта вокруг Ормузского пролива на нефтегаз — критично,
+      т.к. ~20% мировой нефтяной торговли идёт через Hormuz.
+
+  - id: crs_us_iran_conflict_2026-03
+    title: "CRS — U.S. Conflict with Iran (March 26, 2026)"
+    publisher: U.S. Congressional Research Service
+    language: en
+    block: 4_geopolitics
+    type: research_briefing
+    date: "2026-03-26"
+    url: https://www.congress.gov/crs_external_products/R/PDF/R48887/R48887.1.pdf
+    file: crs_us_iran_conflict_2026-03.pdf
+    size_bytes: 704419
+    sha256: c31812840cfacb6efd223eaa66240859e2950e37362d4dcf8db5214c9a0a4bad
+    tags: [iran, us, conflict, oil, geopolitics, sanctions]
+    purpose: >-
+      Свежий обзор US-Iran конфликта (события февраля 2026 — атаки, военные операции).
+      Прямой драйвер премии geopolitical risk в цене Brent.
+
+# =============================================================================
+# Известные ограничения (см. ADR-0009)
+# =============================================================================
+
+known_limitations:
+  - id: iea_omr_full
+    description: IEA OMR full version за paywall с 2020. Используем free version (~5 стр).
+  - id: opec_woo_registration
+    description: OPEC WOO требует одноразовой бесплатной регистрации на publications.opec.org — поэтому скачан вручную, не через fetch_corpus.py.
+  - id: opec_momr
+    description: OPEC MOMR PDF за Cloudflare challenge. Заменён на IEF Comparative Analysis (включает выжимки MOMR).
+  - id: csis_iran
+    description: CSIS публикует только HTML (не PDF). Заменён на CRS reports.
+  - id: vygon_consulting
+    description: |
+      Vygon Consulting публикации защищены WAF (curl получает заглушку).
+      Нужно ручное скачивание через браузер с https://vygon.consulting/pressroom/our-publications/.
+      Опционально, не блокирует RAG.
+  - id: gazprom_msfo_post_2022
+    description: |
+      Газпром не публикует МСФО с 2022 г. Используем Бухгалтерскую отчётность по РСБУ
+      (gazprom_accounting_2024) как единственный финансовый источник.
+
+# =============================================================================
+# Что в корпус НЕ попадает (явные исключения по дизайну)
+# =============================================================================
+
+excluded_by_design:
+  - id: monthly_archive
+    description: |
+      Не берём более одного номера monthly-документов (MOMR, STEO, OMR) — для свежих
+      данных используется web-search в runtime. Глубокий архив в RAG не нужен.
+  - id: global_majors
+    description: |
+      Не берём annual reports глобальных мейджоров (Aramco, Shell, Exxon, BP, Chevron).
+      Фокус ассистента — РФ-периметр; глобальный взгляд покрывается через OPEC WOO/IEA Oil/GIIGNL.
+  - id: paid_subscriptions
+    description: |
+      Не используем платные подписки (Wood Mackenzie, Rystad Energy, S&P Platts, Argus,
+      Refinitiv) — open-access only.
