@@ -78,6 +78,9 @@ repo_bundle_manifest.json
 /data/vectorstore/*
 !/data/vectorstore/.gitkeep
 
+# Ouroboros runtime drive (state, memory, logs) — создаётся при первом запуске
+/data/ouroboros/
+
 # Кеш эмбеддингов
 .embeddings_cache/
 
