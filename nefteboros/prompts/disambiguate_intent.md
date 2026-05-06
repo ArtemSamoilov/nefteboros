@@ -46,6 +46,14 @@ A: `{"type": "out_of_scope", "assets": [], "horizon": null, "refuse_reason": "З
 Q: «насколько энергоносители принесут в казну в 2026 году»
 A: `{"type": "forecast_with_context", "assets": ["brent", "urals", "urals_minfin_blend"], "horizon": "12m", "refuse_reason": null}`
 
+## Жёсткие требования к JSON
+
+- `type=forecast_simple` → `assets` **обязательно** содержит хотя бы один актив из списка валидных. Никогда не пустой массив.
+- `type=forecast_with_context` → `assets` **ровно** `["brent", "urals", "urals_minfin_blend"]`. Не сокращать, не добавлять.
+- `type=russian_gas_refusal` → `assets=[]`, `horizon=null`.
+- `type=out_of_scope` → `assets=[]`, `horizon=null`.
+- `horizon` — строго одно из `"1m" | "3m" | "6m" | "12m" | null`. Никаких "5m", "9m" и т.п. Если запрос подразумевает «бюджет 2026» / «на год» — выставляй `"12m"`.
+
 ## Запрос
 
 {QUERY}

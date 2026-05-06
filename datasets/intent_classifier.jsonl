@@ -1,0 +1,100 @@
+{"query": "прогноз нефти на квартал", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "A_oil_default"}
+{"query": "сколько нефть будет стоить через полгода", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "6m", "category": "A_oil_default"}
+{"query": "нефть на месяц", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "1m", "category": "A_oil_default"}
+{"query": "прогноз нефти на год", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "12m", "category": "A_oil_default"}
+{"query": "прогноз нефти 3m", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "A_oil_default"}
+{"query": "oil price forecast 6 months", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "6m", "category": "A_oil_default"}
+{"query": "crude price на квартал", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "A_oil_default"}
+{"query": "цены на черную нефть на квартал", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "A_oil_default"}
+{"query": "сколько Минфин закладывает в бюджет 2026 по нефти", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "12m", "category": "B_oil_ru_context"}
+{"query": "налоговая цена нефти на 6 месяцев", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "6m", "category": "B_oil_ru_context"}
+{"query": "российская нефть на квартал", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "3m", "category": "B_oil_ru_context"}
+{"query": "нефтегаздоходы РФ на год", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "12m", "category": "B_oil_ru_context"}
+{"query": "Urals на полгода", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "6m", "category": "B_oil_ru_context"}
+{"query": "Минфин нефть прогноз на 12m", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "12m", "category": "B_oil_ru_context"}
+{"query": "НДПИ и нефть прогноз на квартал", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "3m", "category": "B_oil_ru_context"}
+{"query": "сколько российская нефть будет стоить через 3 месяца", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "3m", "category": "B_oil_ru_context"}
+{"query": "Минэк нефть на полгода", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "6m", "category": "B_oil_ru_context"}
+{"query": "сбер бюджет нефть 2026", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "12m", "category": "B_oil_ru_context"}
+{"query": "прогноз нефти для бюджета РФ на год", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "12m", "category": "B_oil_ru_context"}
+{"query": "нефтедоходы для казны на квартал", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "3m", "category": "B_oil_ru_context"}
+{"query": "прогноз WTI на полгода", "expected_type": "forecast_simple", "expected_assets": ["wti"], "expected_horizon": "6m", "category": "C_wti"}
+{"query": "WTI на 3m", "expected_type": "forecast_simple", "expected_assets": ["wti"], "expected_horizon": "3m", "category": "C_wti"}
+{"query": "американская нефть на квартал", "expected_type": "forecast_simple", "expected_assets": ["wti"], "expected_horizon": "3m", "category": "C_wti"}
+{"query": "техасская нефть на год", "expected_type": "forecast_simple", "expected_assets": ["wti"], "expected_horizon": "12m", "category": "C_wti"}
+{"query": "US oil price 6m", "expected_type": "forecast_simple", "expected_assets": ["wti"], "expected_horizon": "6m", "category": "C_wti"}
+{"query": "TTF на год", "expected_type": "forecast_simple", "expected_assets": ["ttf"], "expected_horizon": "12m", "category": "D_ttf"}
+{"query": "европейский газ на 3 месяца", "expected_type": "forecast_simple", "expected_assets": ["ttf"], "expected_horizon": "3m", "category": "D_ttf"}
+{"query": "европейский газовый рынок на полгода", "expected_type": "forecast_simple", "expected_assets": ["ttf"], "expected_horizon": "6m", "category": "D_ttf"}
+{"query": "TTF на месяц", "expected_type": "forecast_simple", "expected_assets": ["ttf"], "expected_horizon": "1m", "category": "D_ttf"}
+{"query": "Dutch TTF на квартал", "expected_type": "forecast_simple", "expected_assets": ["ttf"], "expected_horizon": "3m", "category": "D_ttf"}
+{"query": "Henry Hub на квартал", "expected_type": "forecast_simple", "expected_assets": ["henry_hub"], "expected_horizon": "3m", "category": "E_henry_hub"}
+{"query": "американский газ на полгода", "expected_type": "forecast_simple", "expected_assets": ["henry_hub"], "expected_horizon": "6m", "category": "E_henry_hub"}
+{"query": "US gas на полгода", "expected_type": "forecast_simple", "expected_assets": ["henry_hub"], "expected_horizon": "6m", "category": "E_henry_hub"}
+{"query": "Henry Hub на месяц", "expected_type": "forecast_simple", "expected_assets": ["henry_hub"], "expected_horizon": "1m", "category": "E_henry_hub"}
+{"query": "natural gas в США на год", "expected_type": "forecast_simple", "expected_assets": ["henry_hub"], "expected_horizon": "12m", "category": "E_henry_hub"}
+{"query": "прогноз газа на месяц", "expected_type": "forecast_simple", "expected_assets": ["henry_hub", "ttf"], "expected_horizon": "1m", "category": "F_gas_default"}
+{"query": "газ на квартал", "expected_type": "forecast_simple", "expected_assets": ["henry_hub", "ttf"], "expected_horizon": "3m", "category": "F_gas_default"}
+{"query": "газовые цены на полгода", "expected_type": "forecast_simple", "expected_assets": ["henry_hub", "ttf"], "expected_horizon": "6m", "category": "F_gas_default"}
+{"query": "газ на год", "expected_type": "forecast_simple", "expected_assets": ["henry_hub", "ttf"], "expected_horizon": "12m", "category": "F_gas_default"}
+{"query": "natural gas price 3m", "expected_type": "forecast_simple", "expected_assets": ["henry_hub", "ttf"], "expected_horizon": "3m", "category": "F_gas_default"}
+{"query": "прогноз Brent на 3 месяца", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "G_brent"}
+{"query": "Brent на 6m", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "6m", "category": "G_brent"}
+{"query": "Brent на год", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "12m", "category": "G_brent"}
+{"query": "североморская нефть на квартал", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "G_brent"}
+{"query": "Brent forecast 1m", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "1m", "category": "G_brent"}
+{"query": "цена газа в России в рублях за тыс.м³", "expected_type": "russian_gas_refusal", "expected_assets": [], "expected_horizon": null, "category": "H_russian_gas_refusal"}
+{"query": "прогноз цены газа в России", "expected_type": "russian_gas_refusal", "expected_assets": [], "expected_horizon": null, "category": "H_russian_gas_refusal"}
+{"query": "сколько российский газ стоит внутри страны", "expected_type": "russian_gas_refusal", "expected_assets": [], "expected_horizon": null, "category": "H_russian_gas_refusal"}
+{"query": "внутрироссийский газ цена", "expected_type": "russian_gas_refusal", "expected_assets": [], "expected_horizon": null, "category": "H_russian_gas_refusal"}
+{"query": "газ в России цена 2026", "expected_type": "russian_gas_refusal", "expected_assets": [], "expected_horizon": null, "category": "H_russian_gas_refusal"}
+{"query": "сколько стоит газ в РФ для бытовых потребителей", "expected_type": "russian_gas_refusal", "expected_assets": [], "expected_horizon": null, "category": "H_russian_gas_refusal"}
+{"query": "цена газа для населения России", "expected_type": "russian_gas_refusal", "expected_assets": [], "expected_horizon": null, "category": "H_russian_gas_refusal"}
+{"query": "за тыс м³ российского газа сколько рублей", "expected_type": "russian_gas_refusal", "expected_assets": [], "expected_horizon": null, "category": "H_russian_gas_refusal"}
+{"query": "прогноз нефти на завтра", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "I_horizon_refusal"}
+{"query": "Brent на сутки", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "I_horizon_refusal"}
+{"query": "прогноз brent на 24 месяца", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "I_horizon_refusal"}
+{"query": "WTI на 2 года", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "I_horizon_refusal"}
+{"query": "TTF на 36 месяцев", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "I_horizon_refusal"}
+{"query": "Henry Hub на 5 лет", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "I_horizon_refusal"}
+{"query": "прогноз чёрного золота на квартал", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "Bonny Light на полгода", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "Maya на 3 мес", "expected_type": "forecast_simple", "expected_assets": ["urals"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "Tapis на год", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "12m", "category": "J_no_keyword_match_llm"}
+{"query": "Dubai crude на квартал", "expected_type": "forecast_simple", "expected_assets": ["urals"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "Forcados на 6m", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "Brass crude на квартал", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "Sokol на полгода", "expected_type": "forecast_simple", "expected_assets": ["urals"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "WCS на квартал", "expected_type": "forecast_simple", "expected_assets": ["wti"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "Eagle Ford на полгода", "expected_type": "forecast_simple", "expected_assets": ["wti"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "Permian на год", "expected_type": "forecast_simple", "expected_assets": ["wti"], "expected_horizon": "12m", "category": "J_no_keyword_match_llm"}
+{"query": "African crude на год", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "12m", "category": "J_no_keyword_match_llm"}
+{"query": "Iranian heavy на квартал", "expected_type": "forecast_simple", "expected_assets": ["urals"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "Saudi Arab Light на 6m", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "Murban на полгода", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "энергоносители казна 2026", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "12m", "category": "J_no_keyword_match_llm"}
+{"query": "доходы РФ от нефтегаза на год", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "12m", "category": "J_no_keyword_match_llm"}
+{"query": "цены на углеводороды для российского ТЭК", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": null, "category": "J_no_keyword_match_llm"}
+{"query": "сколько баррель будет стоить через полгода", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "стоимость баррель на квартал", "expected_type": "forecast_simple", "expected_assets": ["brent"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "JKM Asian LNG на квартал", "expected_type": "forecast_simple", "expected_assets": ["ttf"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "СПГ Япония на полгода", "expected_type": "forecast_simple", "expected_assets": ["ttf"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "Юралс на полгода", "expected_type": "forecast_with_context", "expected_assets": ["brent", "urals", "urals_minfin_blend"], "expected_horizon": "6m", "category": "J_no_keyword_match_llm"}
+{"query": "ESPO blend на квартал", "expected_type": "forecast_simple", "expected_assets": ["urals_minfin_blend"], "expected_horizon": "3m", "category": "J_no_keyword_match_llm"}
+{"query": "наш Sahalin Light на год", "expected_type": "forecast_simple", "expected_assets": ["urals"], "expected_horizon": "12m", "category": "J_no_keyword_match_llm"}
+{"query": "погода в Москве", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "помоги выбрать ноутбук", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "сколько весит самолёт", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "прогноз биткоина на квартал", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "акции Сбера на 6m", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "курс рубля прогноз", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "проценты по вкладам", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "ВВП РФ на год", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "инфляция в России", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "акции Tesla", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "доллар к евро прогноз", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "золото на квартал", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "погода в Сочи", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "прогноз пенсий", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "как дела", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
+{"query": "напиши стих про море", "expected_type": "out_of_scope", "expected_assets": [], "expected_horizon": null, "category": "K_out_of_scope"}
