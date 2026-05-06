@@ -130,8 +130,32 @@ def test_smoke_russian_gas_refusal_skips_forecast_and_llm(monkeypatch):
     assert final["citations"] == []
 
 
-def test_smoke_out_of_scope_skips_forecast_and_llm(monkeypatch):
-    """Out-of-scope → forecast и LLM не вызываются."""
+def test_smoke_out_of_scope_skips_forecast_and_synthesize_llm(monkeypatch):
+    """no_keyword_match идёт в llm_disambiguate; если LLM тоже out_of_scope —
+    forecast пропускается, synthesize-LLM не вызывается (refusal path).
+
+    Здесь явно мокаем GigaChat возвращающим out_of_scope, чтобы зафиксировать
+    «и rule-based, и LLM говорят: вне области» — ожидаемое поведение для
+    запроса вроде «погода в Москве»."""
+
+    from nefteboros.graphs.nodes.llm_disambiguate import _LLMIntent
+    from nefteboros.graphs.state import IntentType
+
+    class _FakeStructured:
+        async def ainvoke(self, messages):
+            return _LLMIntent(
+                type=IntentType.OUT_OF_SCOPE,
+                refuse_reason="Запрос вне нефтегазовой темы",
+            )
+
+    class _FakeChat:
+        def with_structured_output(self, schema):
+            return _FakeStructured()
+
+    monkeypatch.setattr(
+        "nefteboros.llm.gigachat.get_gigachat_chat_model",
+        lambda **kwargs: _FakeChat(),
+    )
 
     def boom_forecast(*args, **kwargs):
         raise AssertionError("forecast() не должен вызываться на out_of_scope")
@@ -139,7 +163,7 @@ def test_smoke_out_of_scope_skips_forecast_and_llm(monkeypatch):
     monkeypatch.setattr("nefteboros.forecast.api.forecast", boom_forecast)
 
     async def boom_llm(self, *args, **kwargs):
-        raise AssertionError("LLM не должна вызываться на out_of_scope")
+        raise AssertionError("synthesize-LLM не должна вызываться на refusal-пути")
 
     from ouroboros.llm import LLMClient
     monkeypatch.setattr(LLMClient, "chat_async", boom_llm)
@@ -148,7 +172,7 @@ def test_smoke_out_of_scope_skips_forecast_and_llm(monkeypatch):
     final = asyncio.run(graph.ainvoke(GraphState(query="погода в Москве")))
 
     assert final["intent"].type.value == "out_of_scope"
-    assert final["intent"].matched_rule == "no_keyword_match"
+    assert final["intent"].matched_rule == "llm_out_of_scope"
     assert final["synthesis"]
 
 
@@ -224,3 +248,86 @@ def test_smoke_ru_context_calls_forecast_three_times(monkeypatch, fake_brent_3m_
     assert len(final["forecast_results"]) == 3
     assert final["intent"].type.value == "forecast_with_context"
     assert final["intent"].forecast_horizon == Horizon.M12
+
+
+def test_smoke_llm_disambiguate_routes_to_forecast(monkeypatch, fake_brent_3m_result, fake_llm_text):
+    """no_keyword_match → llm_disambiguate (mock GigaChat) → forecast_call → synthesize."""
+
+    from nefteboros.graphs.nodes.llm_disambiguate import _LLMIntent
+    from nefteboros.graphs.state import IntentType
+
+    class _FakeStructured:
+        async def ainvoke(self, messages):
+            return _LLMIntent(
+                type=IntentType.FORECAST_SIMPLE,
+                assets=["brent"],
+                horizon="3m",
+            )
+
+    class _FakeChat:
+        def with_structured_output(self, schema):
+            return _FakeStructured()
+
+    monkeypatch.setattr(
+        "nefteboros.llm.gigachat.get_gigachat_chat_model",
+        lambda **kwargs: _FakeChat(),
+    )
+
+    def fake_forecast(asset, horizon, **kwargs):
+        if asset == "brent" and horizon == "3m":
+            return fake_brent_3m_result
+        raise ValueError(f"unexpected forecast call: asset={asset!r}, horizon={horizon!r}")
+
+    monkeypatch.setattr("nefteboros.forecast.api.forecast", fake_forecast)
+
+    async def fake_chat_async(self, *args, **kwargs):
+        return ({"content": fake_llm_text}, {})
+
+    from ouroboros.llm import LLMClient
+    monkeypatch.setattr(LLMClient, "chat_async", fake_chat_async)
+
+    graph = build_analyst_graph()
+    final = asyncio.run(
+        graph.ainvoke(GraphState(query="прогноз чёрного золота на квартал"))
+    )
+
+    # Rule-based не классифицировал → no_keyword_match → llm_disambiguate →
+    # LLM сказал forecast_simple [brent] 3m → forecast_call → synthesize
+    assert final["intent"].matched_rule == "llm_forecast_simple"
+    assert final["intent"].forecast_assets == ["brent"]
+    assert final["intent"].forecast_horizon == Horizon.M3
+    assert len(final["forecast_results"]) == 1
+    assert final["synthesis"]
+
+
+def test_smoke_llm_disambiguate_unavailable_falls_back_to_synthesize(monkeypatch):
+    """GigaChat creds не заданы → llm_disambiguate fallback → state.intent остаётся
+    out_of_scope → synthesize выдаёт refuse_reason без forecast/LLM."""
+
+    def angry(**kwargs):
+        raise ValueError("GIGACHAT_CREDENTIALS env not set")
+
+    monkeypatch.setattr(
+        "nefteboros.llm.gigachat.get_gigachat_chat_model",
+        angry,
+    )
+
+    def boom_forecast(*args, **kwargs):
+        raise AssertionError("forecast() не должен вызываться при llm fallback")
+
+    monkeypatch.setattr("nefteboros.forecast.api.forecast", boom_forecast)
+
+    async def boom_llm(self, *args, **kwargs):
+        raise AssertionError("synthesize-LLM не должна вызываться на out_of_scope")
+
+    from ouroboros.llm import LLMClient
+    monkeypatch.setattr(LLMClient, "chat_async", boom_llm)
+
+    graph = build_analyst_graph()
+    final = asyncio.run(
+        graph.ainvoke(GraphState(query="странный запрос вне keyword-набора"))
+    )
+
+    assert final["intent"].type.value == "out_of_scope"
+    assert final["intent"].matched_rule == "llm_unavailable_creds"
+    assert final["synthesis"]
