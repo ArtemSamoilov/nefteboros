@@ -4,7 +4,9 @@
 
 Подпакеты:
   - rag       — RAG-пайплайн по отраслевым отчётам (BGE-M3 + ChromaDB)
-  - forecast  — прогноз цен Brent (ARIMA + Prophet, бектест с CI)
+  - forecast  — прогноз цен нефти и газа (10 активов: Brent/WTI/Urals/ESPO/HH/TTF/JKM/SPIMEX/CBR;
+                 RW + SARIMAX + XGBoost + ensemble; conformal CI; walk-forward бектест с
+                 regime-сегментацией; см. ADR-0012)
   - search    — Brave API + tier-1/tier-2 фильтр источников
   - llm       — адаптеры GigaChat и Cloud.ru Foundation Models
   - graphs    — LangGraph subgraphs (analyst_graph)
