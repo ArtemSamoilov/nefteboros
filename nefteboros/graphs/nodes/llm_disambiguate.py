@@ -1,0 +1,145 @@
+"""llm_disambiguate узел — GigaChat-2-Max для no_keyword_match.
+
+Использует существующий `nefteboros.llm.gigachat.get_gigachat_chat_model`
+(адаптер на langchain-gigachat, выбран в ADR-0007). Lazy import — узел
+graph можно импортировать без langchain stack.
+
+Узел вызывается conditional edge'ом ТОЛЬКО когда rule-based classify
+вернул `Intent(type=OUT_OF_SCOPE, matched_rule="no_keyword_match")` —
+формулировка вне keyword-набора. Refusal'ы из правил #5 и #3
+(deterministic) сюда не попадают — проходят прямо в synthesize.
+
+Resilient: ImportError / ValueError / API error / parse-fail — оставляем
+исходный rule-based intent с пометкой `matched_rule="llm_*"`.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import pathlib
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field, ValidationError
+
+from nefteboros.forecast.schema import Horizon
+from nefteboros.graphs.state import GraphState, Intent, IntentType
+
+logger = logging.getLogger(__name__)
+
+
+_PROMPT_FILE = (
+    pathlib.Path(__file__).resolve().parents[2] / "prompts" / "disambiguate_intent.md"
+)
+_DEFAULT_MODEL = "GigaChat-2-Max"
+_SYSTEM_PROMPT = (
+    "Ты классификатор запросов про нефтегазовый рынок для аналитика Сбера. "
+    "Возвращай ТОЛЬКО валидный JSON по schema. Без markdown, без комментариев "
+    "вне JSON, без префикса/суффикса."
+)
+
+
+class _LLMIntent(BaseModel):
+    """Структура structured output от GigaChat. Конвертируется в наш Intent."""
+
+    type: IntentType
+    assets: list[str] = Field(default_factory=list)
+    horizon: Optional[str] = None
+    refuse_reason: Optional[str] = None
+
+
+def _build_prompt(query: str) -> str:
+    """Заполняем шаблон disambiguate_intent.md значениями {ASSET_LIST}, {QUERY}."""
+    template = _PROMPT_FILE.read_text(encoding="utf-8")
+
+    from nefteboros.forecast.registry import ASSET_REGISTRY
+
+    asset_list = "\n".join(
+        f"- `{aid}` — {meta.display_name}" for aid, meta in ASSET_REGISTRY.items()
+    )
+
+    return template.replace("{ASSET_LIST}", asset_list).replace("{QUERY}", query)
+
+
+def _to_intent(llm: _LLMIntent) -> Intent:
+    """LLM-output → наш Intent. Игнорируем невалидные horizon."""
+    horizon: Optional[Horizon] = None
+    if llm.horizon:
+        try:
+            horizon = Horizon(llm.horizon)
+        except ValueError:
+            logger.warning("LLM returned invalid horizon: %r", llm.horizon)
+    return Intent(
+        type=llm.type,
+        forecast_assets=list(llm.assets),
+        forecast_horizon=horizon,
+        refuse_reason=llm.refuse_reason,
+        matched_rule=f"llm_{llm.type.value}",
+    )
+
+
+def _fallback(state: GraphState, *, reason: str) -> dict[str, Any]:
+    """state.intent остаётся, но matched_rule помечается reason'ом."""
+    if state.intent is None:
+        return {}
+    return {"intent": state.intent.model_copy(update={"matched_rule": reason})}
+
+
+async def llm_disambiguate(state: GraphState) -> dict[str, Any]:
+    """Узел: GigaChat-2-Max для классификации no_keyword_match-запросов.
+
+    Возвращает `{"intent": <new_intent>}` при успехе или fallback-intent
+    при любой ошибке. Узел graph не падает.
+    """
+    try:
+        from nefteboros.llm.gigachat import get_gigachat_chat_model
+    except ImportError as exc:
+        logger.warning("nefteboros.llm.gigachat unavailable: %s", exc)
+        return _fallback(state, reason="llm_unavailable_import")
+
+    try:
+        chat = get_gigachat_chat_model(
+            model=_DEFAULT_MODEL,
+            temperature=0.0,
+            max_tokens=512,
+        )
+    except (ImportError, ValueError) as exc:
+        logger.warning("GigaChat chat model unavailable: %s", exc)
+        return _fallback(state, reason="llm_unavailable_creds")
+
+    try:
+        prompt = _build_prompt(state.query)
+    except OSError as exc:
+        logger.warning("Failed to build disambiguate prompt: %s", exc)
+        return _fallback(state, reason="llm_prompt_unreadable")
+
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        result: Any
+        try:
+            structured = chat.with_structured_output(_LLMIntent)
+            result = await structured.ainvoke(messages)
+        except (NotImplementedError, AttributeError):
+            response = await chat.ainvoke(messages)
+            raw = getattr(response, "content", None) or str(response)
+            data = json.loads(str(raw).strip())
+            result = _LLMIntent(**data)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        logger.warning("GigaChat parse-fail: %s", exc)
+        return _fallback(state, reason="llm_parse_failed")
+    except Exception as exc:  # noqa: BLE001 — graph node must not crash
+        logger.exception("llm_disambiguate failed")
+        return _fallback(state, reason=f"llm_error_{type(exc).__name__}")
+
+    if not isinstance(result, _LLMIntent):
+        logger.warning("Unexpected LLM result shape: %r", type(result).__name__)
+        return _fallback(state, reason="llm_invalid_shape")
+
+    return {"intent": _to_intent(result)}
+
+
+__all__ = ["llm_disambiguate"]
