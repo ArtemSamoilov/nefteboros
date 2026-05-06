@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 # `[<...>]` — простейший паттерн tag'а. Не nested.
 _CITATION_RE = re.compile(r"\[([^\[\]]+?)\]")
 
+# Не считаем cite'ом диапазоны/числа: «[$70.00, $101.00]», «[2024-01-01]» и т.п.
+# Реальный citation tag начинается с буквы или подчёркивания (forecast_model, ADR-0012,
+# OPEC WOO 2025, …) — ведущая цифра/символ валюты/тире — это форматирование, не источник.
+_NON_CITATION_PREFIX = re.compile(r"^[\$€¥£\d\-+\s]")
+
 
 async def validate_citations(state: GraphState) -> dict[str, Any]:
     """Light validation pass. Возвращает partial-update validation_warnings."""
@@ -40,7 +45,11 @@ async def validate_citations(state: GraphState) -> dict[str, Any]:
     expected_tags = {c.tag for c in state.citations}
     found_tags: set[str] = set()
     for match in _CITATION_RE.finditer(synthesis):
-        found_tags.add(f"[{match.group(1)}]")
+        inner = match.group(1)
+        # Числовые диапазоны и значения CI — это форматирование, а не источник.
+        if _NON_CITATION_PREFIX.match(inner):
+            continue
+        found_tags.add(f"[{inner}]")
 
     hallucinated = sorted(t for t in found_tags if t not in expected_tags)
     if hallucinated:
