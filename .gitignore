@@ -93,6 +93,10 @@ repo_bundle_manifest.json
 # Локальные расширения датасетов — НЕ коммитим *.local.jsonl
 /datasets/*.local.*
 
+# Forecast runtime cache (TTL CSV-cache fetcher'ов; см. ADR-0012)
+/datasets/forecast_cache/*
+!/datasets/forecast_cache/.gitkeep
+
 # Telegram bot session files
 *.session
 *.session-journal
