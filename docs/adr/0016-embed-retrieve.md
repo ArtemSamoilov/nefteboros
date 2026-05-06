@@ -58,26 +58,24 @@ Metadata в Chroma — flat dict (Chroma не принимает nested). Сер
 - **FAISS** — нет встроенных metadata-фильтров, нужна обёртка
 - **Weaviate** — оверкилл для нашего размера, отдельный сервис
 
-### Retrieval — bi-encoder + cross-encoder
+### Retrieval — bi-encoder, reranker опционален
 
-Двухэтапная схема:
+Изначально планировалась двухэтапная схема (bi-encoder → cross-encoder reranker). После калибровки на NVIDIA GPU 8 ГБ и CPU-бенча — **reranker отключён в default** из-за server constraints (см. секцию «Calibration» ниже). Bi-encoder retrieval достаточен для baseline, reranker остаётся доступным для off-server eval.
 
-**Этап 1 — bi-encoder retrieval (BGE-M3):**
-- Эмбеддим query
-- Cosine similarity по всем 802 векторам в Chroma
-- Возвращаем top-30 кандидатов (cheap)
-- Опционально применяем metadata-фильтры (регион, блок, язык)
+**Default — bi-encoder only:**
+- Эмбеддим query через BGE-M3
+- Cosine similarity по векторам в Chroma → top-5 (configurable через `k_final`)
+- Metadata-фильтры (регион, блок, язык) применяются на уровне Chroma `where`
 
-**Этап 2 — cross-encoder reranker (`BAAI/bge-reranker-v2-m3`):**
-- Принимает пары (query, chunk_text)
-- Глубже понимает релевантность чем cosine bi-encoder
-- Возвращает top-5 (configurable)
-- Размер модели ~2.3 ГБ, инференс ~50 пар/сек на CPU (приемлемо для top-30)
+**Опционально — cross-encoder reranker** (`BAAI/bge-reranker-v2-m3`):
+- Включается через `Retriever.retrieve(rerank=True)` или env `NEFTEBOROS_RETRIEVAL_RERANK=true`
+- Берёт top-30 от bi-encoder, переоценивает, возвращает top-5
+- Только off-server (нужен GPU 12+ ГБ или мощный CPU; на 8 ГБ GPU две модели не помещаются — VRAM 7962/8192, GPU 100%, заметная деградация)
 
-Альтернативы:
-- **Pure bi-encoder без reranker** — быстрее, но precision@5 ниже на 10-20%. Для нефтегаз-вопросов с тонкой семантикой (например «дисконт Urals к Brent» vs «спред WTI-Brent») reranker даёт ощутимый прирост.
-- **LLM-rerank через kimi** — дороже, медленнее, такой же precision как cross-encoder.
-- **Hybrid BM25 + dense** — BM25 хорошо работает на точных терминах (тикеры, аббревиатуры), но добавляет сложности; отложено в backlog v1.x.
+Альтернативы для будущего production reranker'а (backlog v1.x):
+- **LLM-rerank через kimi-k2p6** через HydraGPT — HTTP-вызов, ~3-5 сек latency, не требует памяти на сервере
+- **`bge-reranker-base`** (278M, ~600 МБ) — в 4× легче v2-m3, multilingual, не тестировали
+- **Hybrid BM25 + dense** — для точных терминов (тикеры, аббревиатуры)
 
 ## Архитектура
 
@@ -143,6 +141,37 @@ ENV-переопределения через `os.environ`:
 - **Pure FAISS вместо Chroma** — Chroma даёт metadata-фильтры из коробки, FAISS требует отдельной реализации.
 - **Embedding+rerank в одной модели** (например cohere-rerank) — vendor lock, не self-hosted.
 - **Sparse-only retrieval (BM25)** — недостаточно для нашего корпуса с разнообразием формулировок (RU/EN).
+
+## Calibration — фактические замеры
+
+### Build_index на NVIDIA GPU 8 ГБ (off-server)
+- BGE-M3, batch=8, max_seq=4096
+- Загрузка модели: ~90 сек
+- Embedding 802 чанков: ~660 сек (~11 мин), 1.2 chunk/sec
+- VRAM: ~2.3 ГБ
+- Upsert в Chroma: ~3 сек
+- **Итого: ~12 мин** ✓
+
+### Reranker rerank-pass на NVIDIA GPU 8 ГБ — **не работает**
+- BGE-M3 (~2.3 ГБ) + bge-reranker-v2-m3 (~2.3 ГБ) = ~4.6 ГБ + CUDA overhead
+- VRAM забит на 7962/8192 МБ, GPU 100%, температура 79°C
+- 6 smoke-тестов (1 query каждый) висят 30+ мин без видимого прогресса
+- **Вывод:** для inference с reranker'ом нужен GPU 12+ ГБ, либо отказаться от reranker'а
+
+### Query embedding на CPU (Mac M-series, 10 cores)
+- Платформа: Darwin arm64, без CUDA
+- Загрузка модели: 7.7 сек
+- RSS после загрузки: 974 МБ
+- Warmup query: 2.4 сек
+- 5 production-style queries: median **89 мс**, mean 102 мс, max 174 мс
+- RSS финальный: **2094 МБ**
+
+### Прогноз для сервера 2 vCPU / 4 ГБ RAM (Timeweb)
+Линейная экстраполяция, 2 vCPU vs 10 cores, без бенчмарка:
+- Cold model load: ~20-25 сек (один раз при старте сервиса)
+- Query latency: ~300-500 мс (warm)
+- RSS: ~2 ГБ под BGE-M3 + ~500 МБ под Ouroboros core ≈ 2.5 ГБ из 4 → **уложится** ✓
+- Reranker: не используется
 
 ## Ссылки
 

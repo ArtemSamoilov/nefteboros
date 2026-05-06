@@ -27,6 +27,11 @@ DEFAULT_RERANKER = os.environ.get(
 )
 DEFAULT_K_DENSE = int(os.environ.get("NEFTEBOROS_RETRIEVAL_K_DENSE", "30"))
 DEFAULT_K_FINAL = int(os.environ.get("NEFTEBOROS_RETRIEVAL_K_FINAL", "5"))
+# По умолчанию reranker ОТКЛЮЧЁН — bge-reranker-v2-m3 (~2.3 ГБ) не вмещается
+# на сервере 4 ГБ рядом с BGE-M3 embedder'ом (~1 ГБ) и Ouroboros core.
+# Reranker доступен через rerank=True для off-server eval / dev.
+# См. ADR-0016, секция «Calibration on CPU».
+DEFAULT_RERANK = os.environ.get("NEFTEBOROS_RETRIEVAL_RERANK", "false").lower() == "true"
 
 
 @dataclass
@@ -123,7 +128,7 @@ class Retriever:
         k_dense: int = DEFAULT_K_DENSE,
         k_final: int = DEFAULT_K_FINAL,
         where: dict | None = None,
-        rerank: bool = True,
+        rerank: bool = DEFAULT_RERANK,
     ) -> list[RankedHit]:
         """Pipeline: embed query → top-k_dense из Chroma → rerank → top-k_final."""
         q_emb = self.embedder.embed_query(query)

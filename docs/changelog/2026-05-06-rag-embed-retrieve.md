@@ -90,5 +90,15 @@
 
 - AST OK для embedder.py, store.py, retriever.py, build_index.py, test_rag_smoke.py
 - `pip install chromadb sentence-transformers torch` — установлены и импортируются
-- `python scripts/build_index.py` — запуск на полном корпусе (см. итог в этом changelog после завершения)
-- `pytest tests/test_rag_smoke.py -v` — после build_index, проверка что 5 demo-запросов находят релевантные источники
+- Build_index на NVIDIA GPU 8 ГБ, batch=8: 802 чанка за **~12 мин**, VRAM ~2.3 ГБ ✓
+- CPU-бенчмарк query embedding (Mac M-series, без GPU, симулирует сервер):
+  - Model load: 7.7 сек, RSS 974 МБ
+  - Query latency (warm): median **89 мс**, p95 174 мс
+  - RSS финальный: **2094 МБ** — уложится в сервер 4 ГБ ✓
+- Reranker bge-reranker-v2-m3 + BGE-M3 на одной машине — **не помещается** в 8 ГБ VRAM, 6 smoke-тестов висят 30+ мин. **Решение:** reranker отключён в default (`rerank=False`), доступен через явный флаг для off-server eval.
+
+## Поправки после калибровки
+
+- `Retriever.retrieve(rerank=DEFAULT_RERANK)` — default `False` через env `NEFTEBOROS_RETRIEVAL_RERANK`
+- `tests/test_rag_smoke.py` — все 6 тестов работают на bi-encoder (быстрый прогон ~5 сек/тест)
+- ADR-0016 дополнен секцией «Calibration» с фактическими замерами + LLM-rerank через kimi обозначен как backlog v1.x

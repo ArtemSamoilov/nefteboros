@@ -58,6 +58,10 @@ def retriever():
 
 @pytest.mark.parametrize("scenario", SMOKE_QUERIES, ids=lambda s: s["demo_scenario"])
 def test_retrieval_finds_relevant_source(retriever, scenario):
+    """Default — bi-encoder only (rerank выключен на сервере, см. ADR-0016).
+
+    Для off-server eval с reranker'ом передавать rerank=True явно.
+    """
     hits = retriever.retrieve(scenario["query"], k_dense=30, k_final=5)
     assert hits, f"Нет hits для query: {scenario['query']!r}"
 
@@ -78,14 +82,13 @@ def test_retrieval_finds_relevant_source(retriever, scenario):
     )
 
 
-def test_metadata_filter_region_russia(retriever):
-    """Фильтр по region=russia должен возвращать только RU-документы."""
+def test_metadata_filter_language_ru(retriever):
+    """Фильтр по language=ru должен возвращать только RU-документы."""
     hits = retriever.retrieve(
         "стратегия развития энергетики",
         k_dense=10,
         k_final=5,
         where={"language": "ru"},
-        rerank=False,  # без reranker — быстрее, проверяем чисто фильтр
     )
     assert hits, "Нет hits с фильтром language=ru"
     for h in hits:
