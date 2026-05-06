@@ -79,6 +79,8 @@ repo_bundle_manifest.json
 !/data/vectorstore/.gitkeep
 /data/markdown/*
 !/data/markdown/.gitkeep
+/data/chunks/*
+!/data/chunks/.gitkeep
 
 # Ouroboros runtime drive (state, memory, logs) — создаётся при первом запуске
 /data/ouroboros/
