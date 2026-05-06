@@ -60,6 +60,17 @@ def main() -> int:
         help="Embedder batch size (default: NEFTEBOROS_EMBED_BATCH или 1; "
         "поднимай только при наличии CUDA GPU 8+ ГБ)",
     )
+    p.add_argument(
+        "--with-heading-prefix",
+        action="store_true",
+        help="Эксперимент: добавить [source_title] + section_path в text перед embedding (см. ADR-0016 / experiments)",
+    )
+    p.add_argument(
+        "--collection",
+        default=None,
+        help="Имя collection (default: NEFTEBOROS_RAG_COLLECTION или nefteboros_corpus_v1). "
+        "Используй другое для A/B экспериментов",
+    )
     args = p.parse_args()
 
     logging.basicConfig(
@@ -77,8 +88,10 @@ def main() -> int:
         return 1
 
     log.info("Загружено %d чанков из %d source-файлов", len(chunks), len({c.source_id for c in chunks}))
+    if args.with_heading_prefix:
+        log.info("Embedding mode: text_for_embedding(with_heading_prefix=True) — эксперимент")
 
-    store = VectorStore.open()
+    store = VectorStore.open(collection_name=args.collection) if args.collection else VectorStore.open()
 
     if args.force:
         log.info("--force: drop коллекции %s", store._collection_name)
@@ -108,8 +121,12 @@ def main() -> int:
     batch_size = args.batch_size if args.batch_size is not None else DEFAULT_BATCH_SIZE
     log.info("Эмбеддинг %d чанков (batch_size=%d)...", len(todo), batch_size)
     t_embed = time.monotonic()
-    texts = [c.text for c in todo]
-    embeddings = embedder.embed(texts, batch_size=batch_size, show_progress=True)
+    # text_for_embedding() возвращает либо c.text, либо c.text с heading-prefix
+    embed_texts = [c.text_for_embedding(with_heading_prefix=args.with_heading_prefix) for c in todo]
+    # В Chroma documents хранится оригинальный c.text — чтобы retrieval возвращал
+    # пользователю контент без префикса в начале
+    docs_for_store = [c.text for c in todo]
+    embeddings = embedder.embed(embed_texts, batch_size=batch_size, show_progress=True)
     log.info(
         "Embeddings готовы за %.1f сек (%.1f чанков/сек)",
         time.monotonic() - t_embed,
@@ -120,7 +137,7 @@ def main() -> int:
     t_upsert = time.monotonic()
     store.upsert(
         ids=[c.id for c in todo],
-        documents=texts,
+        documents=docs_for_store,
         embeddings=embeddings,
         metadatas=[c.chroma_metadata() for c in todo],
     )

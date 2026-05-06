@@ -60,6 +60,25 @@ class Chunk(BaseModel):
     # Topic-tags (от LLM, см. topic_vocabulary.py)
     topic: TopicTags = Field(default_factory=TopicTags)
 
+    def text_for_embedding(self, *, with_heading_prefix: bool = False) -> str:
+        """Текст, передаваемый эмбеддеру.
+
+        with_heading_prefix=True добавляет prefix вида:
+            [{source_title}]
+            {section_path}
+
+            {text}
+
+        Это даёт BGE-M3 контекст «откуда» чанк (см. эксперимент в
+        docs/experiments/rag-baseline-v2-heading-prefix.md). Без prefix
+        embedding опирается только на raw content — что для table-only
+        и similar-chunk корпоративных AR даёт SAME_DOC_MISS.
+        """
+        if not with_heading_prefix:
+            return self.text
+        sp = self.section_path or "(no section)"
+        return f"[{self.source_title}]\n{sp}\n\n{self.text}"
+
     def chroma_metadata(self) -> dict:
         """Сериализация в плоский dict для Chroma metadata.
 
