@@ -124,6 +124,74 @@ flowchart LR
 - Эвал `synthesize` на golden dataset из 20 сценариев («хороший» ответ для shock-период, для спокойного, при расхождении источников).
 - Документировать приоритеты в systemprompt аналитика; явные unit-тесты на rule conflicts.
 
+## Constraints for SKILL.md (PR2 implementation)
+
+Зафиксированы в ходе экзомышления над точками поломки. Эти правила
+`skills/neftegaz_analyst/SKILL.md` должен реализовать в systemprompt или
+routing-логике LangGraph subgraph. Tool (`forecast_tool` из PR1) остаётся
+минималистичным — точный asset, точный horizon → точный output. Disambiguation
+живёт в SKILL'е.
+
+### 1. Generic asset disambiguation
+- **«нефть» / «oil»** без уточнения → default `brent` (мировой benchmark).
+  При упоминании «Россия» / «РФ» / «Сбер» / «бюджет» / «Минфин»
+  → параллельно `brent` + `urals` + `urals_minfin_blend` (топ-3 для контекста РФ-аналитика).
+  При «WTI» / «американская» / «US» → `wti`.
+- **«газ» / «gas»** без уточнения → параллельно `henry_hub` + `ttf` (US + EU
+  benchmarks). **Топ-3 не натягивается** — третьего прямого источника нет
+  (JKM в P2, СПбМТСБ закрыт). К ответу — явный текст: «прямой цены
+  российского газа в публичных источниках нет; индикатор сектора — GAZP/NVTK
+  акции; СПГ Asia — сценарии IEA Gas 2025 / GIIGNL World LNG Report (RAG)».
+
+### 2. Unknown asset handling (Bonny Light, Maya, Dubai, Tapis, Sokol и т.п.)
+**НЕ выдумывать** прогноз LLM-знаниями. Алгоритм:
+1. **Web-search** верифицирует существование марки + получает свежие assessments
+   (Reuters / Bloomberg / Argus blog / S&P Platts).
+2. **Classify в semantic family** — требует расширения registry в PR2:
+   `family: {light_sweet, medium_sour, heavy_sour, lng_spot}`,
+   `region: {north_sea, gulf, mediterranean, far_east, russian_export, ...}`.
+3. **Подобрать proxy** из нашего покрытия по best family+region match.
+4. **Явный disclaimer:** «Запрошенная марка X не покрыта прогнозом напрямую.
+   Использован Y как proxy (light sweet global — ближайшая физика). Реальный X
+   может отклоняться от Y на $±N (по spread из web-search). Для серьёзных
+   решений — Argus / Platts assessments».
+
+### 3. Horizon limits
+- **`horizon < 1m`** (запросы «на завтра», «на неделю»): polite refusal —
+  «дей-трейдинг не наша область, на коротких сроках RW + futures curve
+  доминируют; готов дать 1m с напоминанием о минимальной добавленной ценности
+  модели». Без жёсткого отказа — пользователь не должен думать, что инструмент
+  сломан.
+- **`horizon > 12m`**: **БЕЗ 12m-fallback'а** (это смешанный сигнал, пользователь
+  спросил 24m, не 12). Прямой redirect на сценарные источники RAG:
+  WOO 2025 (до 2050), IEA Oil 2025 (до 2030), ИНЭИ Прогноз (до 2050),
+  Энергостратегия РФ-2050. Это §2.4 ТЗ — приоритизация: для long-term
+  структурные отчёты сильнее статистики.
+
+### 4. Derived asset method consistency
+- Для `urals` / `espo` / `urals_minfin_blend` агент **обязательно явно
+  указывает `method`** в вызове tool'а. При несинхронных вызовах с разными
+  default'ами цифры будут расходиться у пользователя при перепроверке.
+- При сравнительном запросе («Brent vs Urals на 6m») — **один вызов на Brent**
+  выбранным методом, derived layer применяет spread → консистентные числа.
+
+### 5. Russian gas direct pricing — explicit refusal
+Запрос «прогноз цены российского газа в рублях за тыс.м³»: **честный отказ** —
+«прямых daily-котировок внутреннего российского газа в открытых источниках нет
+(СПбМТСБ за коммерческим каналом, CBR-feed мёртв с 2022). Индикаторы:
+TTF (EUR, EU-направление) — proxy экспорта; GAZP акции — рыночная оценка
+эмитента. Для конкретных цифр — RAG (Газпром AR + РСБУ, Минэнерго публикации,
+Энергостратегия РФ-2050)».
+
+### 6. Out of scope (для тестового задания)
+- **Concurrent users / load handling** — single-user демо.
+- **Stale-cache UX warning** — мы не строим прогнозов на <1m, для 3m+
+  устаревание данных на 1-3 дня в пределах ширины CI. Не блокер.
+- **Probability forecasting** («шанс Brent > $120 на 6m») — отдельная фича,
+  PR3 candidate.
+- **Multi-asset параллельные вызовы** — агент сам делает в LangGraph,
+  не уровень tool'а.
+
 ## Что НЕ в PR2
 
 - Тренировка news-aware моделей (LSTM-with-headlines) — overhead, не оправдано для тестового, оставляется на возможный продакшен-вариант.
