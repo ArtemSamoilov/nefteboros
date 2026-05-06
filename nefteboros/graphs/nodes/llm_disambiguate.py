@@ -61,17 +61,47 @@ def _build_prompt(query: str) -> str:
     return template.replace("{ASSET_LIST}", asset_list).replace("{QUERY}", query)
 
 
+_DEFAULT_ASSETS_BY_TYPE: dict[IntentType, list[str]] = {
+    IntentType.FORECAST_SIMPLE: ["brent"],
+    IntentType.FORECAST_WITH_CONTEXT: ["brent", "urals", "urals_minfin_blend"],
+}
+
+
 def _to_intent(llm: _LLMIntent) -> Intent:
-    """LLM-output → наш Intent. Игнорируем невалидные horizon."""
+    """LLM-output → наш Intent.
+
+    Post-process safeguards:
+    - Невалидный horizon → None (LLM иногда возвращает "5m"/"9m").
+    - forecast_* type но пустой assets → подставляем default
+      (forecast_simple → ["brent"]; forecast_with_context →
+      ["brent", "urals", "urals_minfin_blend"]). На GigaChat-2-Max
+      эта ошибка наблюдается чаще всего — type правильный, assets
+      пропущен. Dataset eval (см. docs/experiments/intent_classifier.md)
+      показал, что этот fallback вытягивает type_accuracy с 96% до
+      ~97% и assets_jaccard_mean с 0.67 до 0.85+.
+    - russian_gas_refusal / out_of_scope с assets — обнуляем.
+    """
     horizon: Optional[Horizon] = None
     if llm.horizon:
         try:
             horizon = Horizon(llm.horizon)
         except ValueError:
             logger.warning("LLM returned invalid horizon: %r", llm.horizon)
+
+    assets = list(llm.assets)
+    if llm.type in (IntentType.FORECAST_SIMPLE, IntentType.FORECAST_WITH_CONTEXT):
+        if not assets:
+            assets = list(_DEFAULT_ASSETS_BY_TYPE.get(llm.type, []))
+            logger.info(
+                "LLM returned %s with empty assets — fallback to %s",
+                llm.type.value, assets,
+            )
+    else:
+        assets = []
+
     return Intent(
         type=llm.type,
-        forecast_assets=list(llm.assets),
+        forecast_assets=assets,
         forecast_horizon=horizon,
         refuse_reason=llm.refuse_reason,
         matched_rule=f"llm_{llm.type.value}",
