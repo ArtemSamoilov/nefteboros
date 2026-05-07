@@ -56,6 +56,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 <button class="chat-header-btn" type="button" data-chat-command="evolve" title="Toggle evolution mode">Evolve</button>
                 <button class="chat-header-btn" type="button" data-chat-command="bg" title="Toggle background consciousness">Consciousness</button>
                 <button class="chat-header-btn" type="button" data-chat-command="review" title="Run review now">Review</button>
+                <button class="chat-header-btn" type="button" data-chat-command="new-chat" title="Clear chat history (settings и память не затрагиваются)">New chat</button>
                 <button class="chat-header-btn" type="button" data-chat-command="restart" title="Restart agent">Restart</button>
                 <button class="chat-header-btn danger" type="button" data-chat-command="panic" title="Stop all workers">Panic</button>
             </div>
@@ -1493,6 +1494,31 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }
         if (command === 'restart') {
             ws.send({ type: 'command', cmd: '/restart' });
+            return;
+        }
+        if (command === 'new-chat') {
+            if (!confirm('Очистить историю чата?\n\nУдалятся только видимые сообщения (chat.jsonl и progress.jsonl).\nНастройки, memory (identity/scratchpad/knowledge) и состояние skill — не затрагиваются.')) {
+                return;
+            }
+            (async () => {
+                button.disabled = true;
+                try {
+                    const resp = await fetch('/api/chat/clear', { method: 'POST', cache: 'no-store' });
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    // Очистить DOM bubbles + перетащить пустую history с сервера.
+                    // syncHistory сама ставит historyLoaded = true и retiredTaskIds.clear().
+                    messagesDiv.innerHTML = '';
+                    messagesDiv.appendChild(typingEl);
+                    typingEl.style.display = 'none';
+                    if (typeof syncHistory === 'function') {
+                        await syncHistory({ fromReconnect: true });
+                    }
+                } catch (exc) {
+                    alert('Не удалось очистить историю: ' + exc);
+                } finally {
+                    button.disabled = false;
+                }
+            })();
             return;
         }
         if (command === 'panic' && confirm('Kill all workers immediately?')) {

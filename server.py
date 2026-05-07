@@ -39,7 +39,11 @@ from ouroboros.server_control import (
     execute_panic_stop as _execute_panic_stop_impl,
     restart_current_process as _restart_current_process_impl,
 )
-from ouroboros.server_history_api import make_chat_history_endpoint, make_cost_breakdown_endpoint
+from ouroboros.server_history_api import (
+    make_chat_clear_endpoint,
+    make_chat_history_endpoint,
+    make_cost_breakdown_endpoint,
+)
 from ouroboros.server_auth import (
     NetworkAuthGate,
     get_network_auth_startup_warning,
@@ -789,6 +793,7 @@ def _execute_panic_stop(consciousness, kill_workers_fn) -> None:
 APP_START = time.time()
 api_cost_breakdown = make_cost_breakdown_endpoint(DATA_DIR)
 api_chat_history = make_chat_history_endpoint(DATA_DIR)
+api_chat_clear = make_chat_clear_endpoint(DATA_DIR)
 
 
 async def ws_endpoint(websocket: WebSocket) -> None:
@@ -1547,6 +1552,7 @@ routes = [
     Route("/api/cost-breakdown", endpoint=api_cost_breakdown),
     Route("/api/evolution-data", endpoint=api_evolution_data),
     Route("/api/chat/history", endpoint=api_chat_history),
+    Route("/api/chat/clear", endpoint=api_chat_clear, methods=["POST"]),
     Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
     Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
     Route("/api/local-model/start", endpoint=api_local_model_start, methods=["POST"]),

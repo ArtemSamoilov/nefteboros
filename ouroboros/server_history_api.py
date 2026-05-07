@@ -172,3 +172,42 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         return JSONResponse({"messages": messages})
 
     return api_chat_history
+
+
+def make_chat_clear_endpoint(data_dir: pathlib.Path):
+    """Truncate chat-visible logs without touching settings, memory or skill state.
+
+    Clears ``logs/chat.jsonl`` and ``logs/progress.jsonl`` (the two sources the
+    UI reads via ``/api/chat/history``). Does NOT touch:
+
+    - ``settings.json`` (network password, provider config — must persist
+      across "new chat")
+    - ``memory/*`` (identity, scratchpad, knowledge base)
+    - ``state/*`` (skill enable, runtime state, advisory review)
+    - ``logs/events.jsonl``, ``logs/tools.jsonl``, ``logs/supervisor.jsonl``
+      (technical traces — not visible in chat UI but useful for postmortems)
+
+    POST-only. Returns ``{"status": "ok", "cleared": [...]}`` with the list
+    of files that were truncated.
+    """
+    async def api_chat_clear(_request: Request) -> JSONResponse:
+        cleared: list[str] = []
+        for fname in ("chat.jsonl", "progress.jsonl"):
+            path = data_dir / "logs" / fname
+            if not path.exists():
+                continue
+            try:
+                # write_text with empty string is atomic-enough for our purpose:
+                # if the writer races with us, the worst case is one stale line
+                # gets retained — the UI's next syncHistory will repaint it.
+                path.write_text("", encoding="utf-8")
+                cleared.append(fname)
+            except OSError as exc:
+                log.warning("chat clear: failed to truncate %s: %s", path, exc)
+                return JSONResponse(
+                    {"error": f"failed to truncate {fname}: {exc}"},
+                    status_code=500,
+                )
+        return JSONResponse({"status": "ok", "cleared": cleared})
+
+    return api_chat_clear
