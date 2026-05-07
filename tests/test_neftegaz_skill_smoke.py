@@ -47,13 +47,15 @@ def test_manifest_parses_without_warnings() -> None:
 
 
 def test_manifest_permissions_minimal() -> None:
-    """Permissions ровно [tool, route] — никаких лишних."""
+    """Permissions ровно [net, tool, route] — net добавлен в 0.3.1 для honest
+    declaration outbound HTTP (Brave / yfinance / EIA / MOEX / GigaChat).
+    Никаких других permissions (subprocess/fs/widget) не нужно."""
     from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
 
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     manifest = parse_skill_manifest_text(text)
 
-    assert sorted(manifest.permissions) == ["route", "tool"]
+    assert sorted(manifest.permissions) == ["net", "route", "tool"]
 
 
 def test_manifest_no_env_from_settings() -> None:
