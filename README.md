@@ -12,10 +12,10 @@
 
 **Возможности:**
 - Отвечает на вопросы по нефтегазовой отрасли (Upstream/Midstream/Downstream, ОПЕК+, ценообразование Brent/WTI/Urals, санкции, спрос/предложение)
-- Гибридный поиск: RAG по отчётам OPEC/IEA/EIA + веб-поиск через Brave API
-- Прогноз цен Brent на 1/3/6 месяцев (ARIMA + Prophet, доверительные интервалы)
-- Логика приоритизации источников: RAG → web → синтез с явной маркировкой `[Отчёт OPEC MOMR, март 2025]` vs `[Источник: Reuters, web]`
-- Anti-hallucination валидатор цитат
+- Гибридный поиск: RAG по отчётам OPEC/IEA/EIA + веб-поиск через Brave API с tier-фильтрацией и auto language detection (RU-запрос → RU-источники, EN → EN)
+- Прогноз цен Brent на 1/3/6/12 месяцев (ARIMA / SARIMAX, доверительные интервалы)
+- Логика приоритизации источников: RAG → web → forecast с явной маркировкой `[Отчёт OPEC MOMR, март 2026]` vs `[Источник: reuters.com, web]` vs `[Forecast: ARIMA, CI 80%]`
+- Anti-hallucination валидатор цитат для RAG (web — в backlog)
 
 **Интерфейсы:**
 - Web UI (Ouroboros web, в перспективе — Streamlit)
@@ -35,12 +35,12 @@ nefteboros/
 ├── ouroboros/              # ядро (форк, после выпила self-modify)
 ├── nefteboros/             # доменный код:
 │   ├── rag/                #   PDF → BGE-M3 → ChromaDB
-│   ├── forecast/           #   ARIMA + Prophet с CI
-│   ├── search/             #   Brave API + tier-1/tier-2 фильтр
+│   ├── forecast/           #   ARIMA / SARIMAX с CI
+│   ├── search/             #   Brave API + tier-1/tier-2 фильтр + lang detection (ADR-0022)
 │   ├── llm/                #   GigaChat, Cloud.ru
 │   ├── graphs/             #   LangGraph subgraph
 │   ├── prompts/            #   системный промпт аналитика
-│   ├── citations/          #   anti-hallucination валидатор
+│   ├── citations/          #   anti-hallucination валидатор (RAG)
 │   └── bot/                #   Telegram-бот (aiogram)
 ├── skills/neftegaz_analyst/  # SKILL.md + plugin.py (Ouroboros plugin)
 ├── data/                   # PDF корпус (gitignored), metadata, vectorstore

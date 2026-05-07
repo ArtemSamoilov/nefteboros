@@ -1,4 +1,4 @@
-"""Skill neftegaz_analyst — два независимых tools для нефтегаз-аналитика.
+"""Skill neftegaz_analyst — три независимых tools для нефтегаз-аналитика.
 
 Tools (через PluginAPI v1):
   1. `analyst_query` — analyst LangGraph subgraph (forecast + synthesis).
@@ -7,14 +7,17 @@ Tools (через PluginAPI v1):
   2. `rag_search` — прямой retrieval из RAG-корпуса (802 chunks отчётов
      OPEC/IEA/EIA/корпоративка/санкции). Тонкая обёртка над
      `nefteboros.rag.retriever.Retriever`. Возвращает top-k chunks с метаданными.
+  3. `web_search` — Brave Search API с tier-фильтрацией + auto language
+     detection (RU-запрос → RU-источники, EN → EN). Тонкая обёртка над
+     `nefteboros.search.WebSearcher`. Возвращает top-k результатов.
 
-Агент в Ouroboros loop'е сам выбирает какой tool вызвать (или оба) —
+Агент в Ouroboros loop'е сам выбирает какой tool вызвать (или несколько) —
 системный промпт прописывает приоритизацию из ТЗ §2.4 (RAG → web → forecast).
 
 См.:
 - ADR-0016 — `analyst_query` thin-wrapper design.
-- ADR-0018 — `rag_search` tool, multi-tool architecture rationale (этот PR).
-- ADR-0016 (embed+retrieve) + rag-full-eval-report.md — RAG retrieval pipeline.
+- ADR-0018 — `rag_search` tool, multi-tool architecture rationale.
+- ADR-0022 — `web_search` tool, Brave + tier filter (этот PR).
 """
 
 from __future__ import annotations
@@ -117,6 +120,74 @@ _RAG_TOOL_SCHEMA = {
 _RAG_DEFAULT_K = 5
 _RAG_MAX_K = 10
 _RAG_MAX_TEXT_CHARS = 4000  # на chunk — ограничение для tool response payload
+
+
+# =============================================================================
+# web_search tool spec
+# =============================================================================
+
+_WEB_TOOL_DESCRIPTION = (
+    "Веб-поиск через Brave Search API для свежих рыночных данных:\n"
+    "- spot-цены и текущие котировки;\n"
+    "- свежие новости (заявления OPEC+, Минэнерго, Минфина, регуляторов);\n"
+    "- комментарии и события последних дней / недель / месяцев.\n\n"
+    "Язык запроса определяется автоматически по кириллице. Русский → "
+    "RU-источники: Vedomosti / Kommersant / RBC / Interfax / TASS. "
+    "Английский → EN-источники: Reuters / Bloomberg / FT / Argus / "
+    "S&P Platts / Wood Mackenzie / OilPrice / OPEC.org / IEA.org / EIA.gov.\n\n"
+    "ИСПОЛЬЗУЙ на: «текущая цена Brent», «что заявил Новак сегодня», "
+    "«последние санкции против Газпрома», «спот WTI», «свежие новости рынка».\n\n"
+    "НЕ ИСПОЛЬЗУЙ на: documentary факты из отчётов (для них rag_search), "
+    "численные прогнозы цен (для них analyst_query). По ТЗ §2.4 порядок "
+    "приоритета — RAG → web → forecast: сначала пробуй rag_search, "
+    "если в корпусе нет — тогда web_search.\n\n"
+    "Возвращает JSON: {results: [{title, url, hostname, tier, snippet, "
+    "age, published}]}, где tier — 'tier1' (верифицированные деловые) / "
+    "'tier2' (общие СМИ) / 'other'. Цитируй как `[Источник: <hostname>, web]`."
+)
+
+_WEB_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Поисковый запрос на естественном языке (RU/EN). Язык запроса "
+                "определяет приоритетные источники (RU-запрос → RU-tier1). "
+                "До 2000 символов."
+            ),
+        },
+        "freshness": {
+            "type": "string",
+            "enum": ["pd", "pw", "pm", "py"],
+            "description": (
+                "Окно свежести: pd (past day) / pw (past week, default) / "
+                "pm (past month) / py (past year)."
+            ),
+        },
+        "k": {
+            "type": "integer",
+            "description": "Количество результатов (default 5, max 10).",
+            "minimum": 1,
+            "maximum": 10,
+        },
+        "tier": {
+            "type": "string",
+            "enum": ["all", "tier1"],
+            "description": (
+                "Фильтр источников: 'all' (default — tier1+tier2 без "
+                "blacklist) или 'tier1' (только верифицированные деловые)."
+            ),
+        },
+    },
+    "required": ["query"],
+}
+
+_WEB_DEFAULT_K = 5
+_WEB_MAX_K = 10
+_WEB_MAX_SNIPPET_CHARS = 500
+_WEB_VALID_FRESHNESS = frozenset({"pd", "pw", "pm", "py"})
+_WEB_VALID_TIER = frozenset({"all", "tier1"})
 
 
 # =============================================================================
@@ -303,6 +374,119 @@ def _tool_rag_search(*, query: str = "", k: int = _RAG_DEFAULT_K) -> str:
 
 
 # =============================================================================
+# web_search tool handler
+# =============================================================================
+
+
+def _serialize_web_hit(hit: Any) -> dict[str, Any]:
+    snippet = hit.snippet or ""
+    if len(snippet) > _WEB_MAX_SNIPPET_CHARS:
+        snippet = snippet[:_WEB_MAX_SNIPPET_CHARS] + "…"
+    return {
+        "title": hit.title,
+        "url": hit.url,
+        "hostname": hit.hostname,
+        "tier": hit.tier,
+        "snippet": snippet,
+        "age": hit.age,
+        "published": hit.published,
+    }
+
+
+def _tool_web_search(
+    *,
+    query: str = "",
+    freshness: str = "pw",
+    k: int = _WEB_DEFAULT_K,
+    tier: str = "all",
+) -> str:
+    """PluginAPI tool handler. Возвращает JSON-string.
+
+    Resilient — не падает на сетевых ошибках / 429 / отсутствии ключа.
+    Возвращает JSON с error-полем, чтобы Ouroboros loop увидел ошибку,
+    но не валился.
+    """
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return json.dumps({"error": "query is empty"}, ensure_ascii=False)
+    if len(cleaned) > _MAX_QUERY_CHARS:
+        return json.dumps(
+            {
+                "error": (
+                    f"query too long: {len(cleaned)} chars (max {_MAX_QUERY_CHARS})"
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        k_int = int(k)
+    except (TypeError, ValueError):
+        k_int = _WEB_DEFAULT_K
+    k_int = max(1, min(_WEB_MAX_K, k_int))
+
+    if freshness not in _WEB_VALID_FRESHNESS:
+        freshness = "pw"
+    if tier not in _WEB_VALID_TIER:
+        tier = "all"
+
+    # Lazy import — httpx подтягивается, плюс свои модули. Делаем
+    # только при реальном вызове, не при register(api).
+    try:
+        from nefteboros.search import BraveError, WebSearcher
+    except ImportError as exc:
+        logger.warning("WebSearcher unavailable: %s", exc)
+        return json.dumps(
+            {
+                "error": (
+                    f"web_search unavailable: {type(exc).__name__}: {exc}. "
+                    "Установи httpx (requirements.txt)."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    searcher = WebSearcher()
+    if not searcher.has_key:
+        return json.dumps(
+            {
+                "error": (
+                    "BRAVE_API_KEY not set. Get a key at brave.com/search/api/, "
+                    "поставь его в .env."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        hits = searcher.search(
+            cleaned, k=k_int, freshness=freshness, tier_filter=tier
+        )
+    except BraveError as exc:
+        logger.warning("web_search Brave failure: %s", exc)
+        return json.dumps(
+            {"error": f"Brave search failed: {type(exc).__name__}: {exc}"},
+            ensure_ascii=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — tool handler must not crash
+        logger.exception("web_search unexpected failure")
+        return json.dumps(
+            {"error": f"web_search runtime error: {type(exc).__name__}: {exc}"},
+            ensure_ascii=False,
+        )
+
+    payload = {
+        "query": cleaned,
+        "k": k_int,
+        "freshness": freshness,
+        "tier_filter": tier,
+        "total_returned": len(hits),
+        "results": [_serialize_web_hit(h) for h in hits],
+    }
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+# =============================================================================
 # Healthcheck route
 # =============================================================================
 
@@ -317,9 +501,10 @@ async def _route_health(request: Request) -> JSONResponse:
         {
             "status": "ok",
             "skill": "neftegaz_analyst",
-            "tools": ["analyst_query", "rag_search"],
+            "tools": ["analyst_query", "rag_search", "web_search"],
             "graph": "nefteboros.graphs.analyst_graph",
             "rag_retriever": "nefteboros.rag.retriever",
+            "web_searcher": "nefteboros.search.WebSearcher",
         }
     )
 
@@ -345,10 +530,18 @@ def register(api: Any) -> None:
         schema=_RAG_TOOL_SCHEMA,
         timeout_sec=30,
     )
+    api.register_tool(
+        "web_search",
+        _tool_web_search,
+        description=_WEB_TOOL_DESCRIPTION,
+        schema=_WEB_TOOL_SCHEMA,
+        timeout_sec=20,
+    )
     api.register_route("health", _route_health, methods=("GET",))
     api.log(
         "info",
-        "neftegaz_analyst: registered 2 tools (analyst_query, rag_search) + health route",
+        "neftegaz_analyst: registered 3 tools "
+        "(analyst_query, rag_search, web_search) + health route",
     )
 
 

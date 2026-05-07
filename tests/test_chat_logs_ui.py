@@ -240,7 +240,7 @@ def test_chat_history_conditionally_forces_live_card_for_task_summaries():
 def test_progress_messages_force_live_card_visible():
     """Progress messages (e.g. '🔍 Searching...') must force the live card open.
 
-    Without forceCard, a single-tool-call task (like web_search) would buffer
+    Without forceCard, a single-tool-call task (like code_search) would buffer
     progress into an invisible card (toolCalls <= 1) and the user sees nothing
     until the final result arrives. forceCard must be set inside
     updateLiveCardFromProgressMessage before queueTaskLiveUpdate is called.

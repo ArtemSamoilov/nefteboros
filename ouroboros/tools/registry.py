@@ -325,7 +325,7 @@ CORE_TOOL_NAMES = {
     "schedule_task", "wait_for_task", "get_task_result",
     "set_tool_timeout",
     "update_scratchpad", "update_identity",
-    "chat_history", "web_search",
+    "chat_history",
     "send_user_message", "switch_model",
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write", "knowledge_list",
@@ -348,7 +348,7 @@ class ToolRegistry:
     _FROZEN_TOOL_MODULES = [
         "a2a", "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_rollback", "github", "health",
-        "knowledge", "memory_tools", "plan_review", "review", "search", "shell",
+        "knowledge", "memory_tools", "plan_review", "review", "shell",
         # Phase 3 three-layer refactor: external skill surface
         # (list_skills / review_skill / skill_exec / toggle_skill).
         "skill_exec",
