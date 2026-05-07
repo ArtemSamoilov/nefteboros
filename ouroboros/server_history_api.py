@@ -169,7 +169,19 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
 
         combined.sort(key=lambda m: m.get("ts", ""))
         messages = combined[-limit:] if len(combined) > limit else combined
-        return JSONResponse({"messages": messages})
+        # Cache-Control: no-store запрещает browser disk cache. Без этого
+        # после truncate chat.jsonl + reload браузер мог вернуть старый
+        # ответ из disk cache (даже при fetch с cache: 'no-store' в JS,
+        # Safari/Chrome иногда квиркуют). Headers — самый надёжный
+        # backstop для destructive UX-actions типа «New chat».
+        return JSONResponse(
+            {"messages": messages},
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     return api_chat_history
 
