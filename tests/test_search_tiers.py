@@ -32,6 +32,7 @@ class TestClassifyDefaults:
     @pytest.mark.parametrize(
         "host, expected_tier",
         [
+            # Original tier1
             ("reuters.com", "tier1"),
             ("www.bloomberg.com", "tier1"),
             ("ft.com", "tier1"),
@@ -40,16 +41,66 @@ class TestClassifyDefaults:
             ("vedomosti.ru", "tier1"),
             ("opec.org", "tier1"),
             ("eia.gov", "tier1"),
+            # New tier1 — regulators (sanctions + budget)
+            ("state.gov", "tier1"),
+            ("ofac.treasury.gov", "tier1"),
+            ("minfin.gov.ru", "tier1"),
+            # New tier1 — global news
+            ("bbc.com", "tier1"),
+            ("nytimes.com", "tier1"),
+            # New tier1 — top think tanks
+            ("brookings.edu", "tier1"),
+            ("atlanticcouncil.org", "tier1"),
+            ("ieefa.org", "tier1"),
+            ("energyandcleanair.org", "tier1"),
+            # New tier1 — specialised energy
+            ("lngjournal.com", "tier1"),
+            # Original tier2
             ("cnbc.com", "tier2"),
             ("forbes.com", "tier2"),
             ("rg.ru", "tier2"),
             ("expert.ru", "tier2"),
+            # New tier2 — global news/business
+            ("aljazeera.com", "tier2"),
+            ("politico.com", "tier2"),
+            ("fortune.com", "tier2"),
+            ("newsweek.com", "tier2"),
+            ("foxnews.com", "tier2"),
+            ("arabnews.com", "tier2"),
+            ("asiatimes.com", "tier2"),
+            ("finance.yahoo.com", "tier2"),
+            # New tier2 — RU independent
+            ("meduza.io", "tier2"),
+            ("themoscowtimes.com", "tier2"),
+            ("svoboda.org", "tier2"),
+            ("forbes.ru", "tier2"),
+            # New tier2 — RU industry/business
+            ("portnews.ru", "tier2"),
+            ("abnews.ru", "tier2"),
+            ("business-gazeta.ru", "tier2"),
+            # New tier2 — UA business
+            ("forbes.ua", "tier2"),
+            ("liga.net", "tier2"),
+            ("epravda.com.ua", "tier2"),
+            ("minfin.com.ua", "tier2"),
+            # Original blacklist
             ("reddit.com", "blacklist"),
             ("dzen.ru", "blacklist"),
             ("vk.com", "blacklist"),
             ("zen.yandex.ru", "blacklist"),
             ("wikipedia.org", "blacklist"),
             ("mail.ru", "blacklist"),
+            # New blacklist — yellow press / promo / aggregators
+            ("life.ru", "blacklist"),
+            ("moneytimes.ru", "blacklist"),
+            ("investmint.ru", "blacklist"),
+            ("seala.ru", "blacklist"),
+            ("heygotrade.com", "blacklist"),
+            ("litefinance.org", "blacklist"),
+            ("discoveryalert.com.au", "blacklist"),
+            ("globalmarketnews.com", "blacklist"),
+            ("theglobalstatistics.com", "blacklist"),
+            # Other — fallback for unknown
             ("unknown-blog.example", "other"),
         ],
     )
@@ -70,10 +121,19 @@ class TestSubdomainMatch:
             ("uk.reuters.com", "tier1"),
             ("www.ft.com", "tier1"),
             ("api.opec.org", "tier1"),
+            # New tier1 subdomains
+            ("travel.state.gov", "tier1"),
+            ("www.brookings.edu", "tier1"),
+            ("ru.atlanticcouncil.org", "tier1"),
             # tier2 subdomains — главный кейс из live smoke
             ("markets.businessinsider.com", "tier2"),
             ("www.cnbc.com", "tier2"),
             ("oil.expert.ru", "tier2"),
+            # New tier2 subdomains
+            ("ru.themoscowtimes.com", "tier2"),
+            ("m.business-gazeta.ru", "tier2"),
+            ("biz.liga.net", "tier2"),
+            ("index.minfin.com.ua", "tier2"),
             # blacklist subdomains
             ("ru.wikipedia.org", "blacklist"),
             ("en.wikipedia.org", "blacklist"),
@@ -81,6 +141,9 @@ class TestSubdomainMatch:
             ("news.mail.ru", "blacklist"),
             ("old.reddit.com", "blacklist"),
             ("api.dzen.ru", "blacklist"),
+            # New blacklist subdomains
+            ("news.life.ru", "blacklist"),
+            ("blog.litefinance.org", "blacklist"),
         ],
     )
     def test_subdomain_inherits_tier(self, host: str, expected_tier: str) -> None:

@@ -32,16 +32,26 @@ _DEFAULT_TIER1 = frozenset({
     "bloomberg.com",
     "ft.com",
     "wsj.com",
+    "nytimes.com",
+    "bbc.com",
     "argusmedia.com",
     "spglobal.com",
     "platts.com",
     "woodmac.com",
     "energyintel.com",
     "rystadenergy.com",
-    # Regulators / institutional
+    # Regulators / institutional (sanctions + budget)
     "iea.org",
     "opec.org",
     "eia.gov",
+    "state.gov",
+    "ofac.treasury.gov",
+    "minfin.gov.ru",
+    # Top-tier think tanks (geopolitics + energy economics)
+    "brookings.edu",
+    "atlanticcouncil.org",
+    "ieefa.org",
+    "energyandcleanair.org",
     # RU business
     "rbc.ru",
     "vedomosti.ru",
@@ -52,6 +62,7 @@ _DEFAULT_TIER1 = frozenset({
     # Specialised energy press
     "oilprice.com",
     "energyintelligence.com",
+    "lngjournal.com",
 })
 
 _DEFAULT_TIER2 = frozenset({
@@ -61,6 +72,16 @@ _DEFAULT_TIER2 = frozenset({
     "forbes.com",
     "businessinsider.com",
     "axios.com",
+    "fortune.com",
+    "newsweek.com",
+    "foxnews.com",
+    "politico.com",
+    # International / regional
+    "aljazeera.com",
+    "arabnews.com",
+    "asiatimes.com",
+    # Финансовые порталы с подбором
+    "finance.yahoo.com",
     # RU general/energy
     "rg.ru",
     "iz.ru",
@@ -69,6 +90,19 @@ _DEFAULT_TIER2 = frozenset({
     "tek-all.ru",
     "energyland.info",
     "lenta.ru",
+    "portnews.ru",
+    "abnews.ru",
+    "business-gazeta.ru",
+    # RU independent / эмиграционная журналистика
+    "meduza.io",
+    "themoscowtimes.com",
+    "svoboda.org",
+    "forbes.ru",
+    # UA business (релевантно для геополитики / санкций)
+    "forbes.ua",
+    "liga.net",
+    "epravda.com.ua",
+    "minfin.com.ua",
 })
 
 _DEFAULT_BLACKLIST = frozenset({
@@ -87,6 +121,21 @@ _DEFAULT_BLACKLIST = frozenset({
     "zen.yandex.ru",
     "dzen.ru",
     "mail.ru",
+    # RU финансовые агрегаторы (выявлены аудитом 2026-05-07): без
+    # редакции, не публикуют отчёты/прогнозы — компиляция чужого
+    "moneytimes.ru",
+    "investmint.ru",
+    # Yellow press
+    "life.ru",
+    # Broker affiliate / forex marketing — manipulative content,
+    # не journalism
+    "seala.ru",
+    "heygotrade.com",
+    "litefinance.org",
+    "discoveryalert.com.au",
+    # Generic feeds / SEO-фермы без originality
+    "globalmarketnews.com",
+    "theglobalstatistics.com",
     # Справочники — не источник news (для documentary вопросов есть
     # rag_search; для свежих новостей wiki не релевантен)
     "wikipedia.org",
