@@ -527,7 +527,7 @@ class LLMClient:
         model: str,
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: str = "medium",
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         tool_choice: str = "auto",
         use_local: bool = False,
         temperature: Optional[float] = None,
@@ -544,6 +544,9 @@ class LLMClient:
         was forked from a multithreaded parent (e.g. macOS app-bundle
         workers) to avoid a SIGSEGV in SCDynamicStoreCopyProxiesWithOptions.
         """
+        if max_tokens is None:
+            from ouroboros.config import get_max_output_tokens
+            max_tokens = get_max_output_tokens()
         if use_local:
             return self._chat_local(messages, tools, max_tokens, tool_choice)
 
@@ -559,7 +562,7 @@ class LLMClient:
         model: str,
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: str = "medium",
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         no_proxy: bool = False,
@@ -585,6 +588,9 @@ class LLMClient:
         """
         if tools:
             raise ValueError("chat_async does not support tool calls")
+        if max_tokens is None:
+            from ouroboros.config import get_max_output_tokens
+            max_tokens = get_max_output_tokens()
         target = self._resolve_remote_target(model)
         if target.get("provider") == "anthropic":
             return await asyncio.to_thread(
@@ -1555,6 +1561,12 @@ class LLMClient:
                 no_proxy=no_proxy,
             )
 
+        # openai-compatible (e.g. Hydra-proxied) — same rationale as ``chat_async``:
+        # non-stream max_tokens cap at 4096 with a hard 400, and ``delta.reasoning_content``
+        # vendor extension is silently dropped by the standard SDK accumulator.
+        # See ``chat_async`` docstring for full context.
+        use_stream = target.get("provider") == "openai-compatible"
+
         if no_proxy:
             import httpx
             from openai import OpenAI
@@ -1582,6 +1594,9 @@ class LLMClient:
                 kwargs = self._build_remote_kwargs(
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
                 )
+                if use_stream:
+                    payload = self._collect_stream_response_sync(_oa_client, kwargs)
+                    return self._normalize_remote_response(payload, target, skip_cost_fetch=True)
                 resp = _oa_client.chat.completions.create(**kwargs)
                 # Pass no_proxy=True to _normalize_remote_response so the
                 # _fetch_generation_cost fallback (which uses requests.get with
@@ -1598,8 +1613,58 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
+        if use_stream:
+            payload = self._collect_stream_response_sync(client, kwargs)
+            return self._normalize_remote_response(payload, target)
         resp = client.chat.completions.create(**kwargs)
         return self._normalize_remote_response(resp.model_dump(), target)
+
+    @staticmethod
+    def _collect_stream_response_sync(
+        client: Any, kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Sync mirror of :meth:`_collect_stream_response`.
+
+        Same rationale: openai-compatible (Hydra) caps non-stream ``max_tokens``
+        at 4096; stream removes the cap. Vendor extension ``delta.reasoning_content``
+        is dropped by the standard SDK iterator (we only accumulate ``delta.content``).
+        """
+        stream_kwargs = dict(kwargs)
+        stream_kwargs["stream"] = True
+        stream_kwargs["stream_options"] = {"include_usage": True}
+        content_parts: List[str] = []
+        role = "assistant"
+        finish_reason: Optional[str] = None
+        usage: Dict[str, Any] = {}
+        response_id = ""
+        response_model = str(stream_kwargs.get("model") or "")
+        for chunk in client.chat.completions.create(**stream_kwargs):
+            data = chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk or {})
+            response_id = str(data.get("id") or response_id)
+            response_model = str(data.get("model") or response_model)
+            for choice in data.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    content_parts.append(str(delta["content"]))
+                if delta.get("role"):
+                    role = str(delta["role"])
+                if choice.get("finish_reason"):
+                    finish_reason = str(choice["finish_reason"])
+            chunk_usage = data.get("usage")
+            if isinstance(chunk_usage, dict) and chunk_usage:
+                usage = chunk_usage
+        return {
+            "id": response_id,
+            "model": response_model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": role, "content": "".join(content_parts)},
+                    "finish_reason": finish_reason or "stop",
+                }
+            ],
+            "usage": usage,
+        }
 
     def _chat_openrouter(
         self,

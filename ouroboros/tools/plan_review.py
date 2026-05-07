@@ -389,7 +389,7 @@ async def _query_reviewer(
                 ],
                 model=model,
                 reasoning_effort=_PLAN_REVIEW_EFFORT,
-                max_tokens=_PLAN_REVIEW_MAX_TOKENS,
+                # max_tokens omitted — global default (config.get_max_output_tokens, 256K)
                 temperature=0.2,
                 no_proxy=True,
             )
