@@ -161,22 +161,33 @@ def _import_plugin_module():
     return module
 
 
-def test_register_tool_and_route() -> None:
-    """register(api) регистрирует analyst_query (tool) и health (route)."""
+def test_register_two_tools_and_route() -> None:
+    """register(api) регистрирует analyst_query + rag_search + health route (см. ADR-0018)."""
     plugin = _import_plugin_module()
     api = _CaptureAPI()
     plugin.register(api)
 
-    assert len(api.tools) == 1
-    assert api.tools[0]["name"] == "analyst_query"
-    assert api.tools[0]["timeout_sec"] == 120
-    assert "Brent" in api.tools[0]["description"]
-    assert "out_of_scope" in api.tools[0]["description"].lower() or "Минфин" in api.tools[0]["description"]
+    assert len(api.tools) == 2, (
+        f"expected 2 tools (analyst_query + rag_search), got {[t['name'] for t in api.tools]}"
+    )
+    tool_names = {t["name"] for t in api.tools}
+    assert tool_names == {"analyst_query", "rag_search"}, f"got: {tool_names}"
 
-    schema = api.tools[0]["schema"]
-    assert schema["type"] == "object"
-    assert "query" in schema["properties"]
-    assert schema["required"] == ["query"]
+    aq = next(t for t in api.tools if t["name"] == "analyst_query")
+    assert aq["timeout_sec"] == 120
+    assert "Brent" in aq["description"]
+    assert aq["schema"]["required"] == ["query"]
+
+    rs = next(t for t in api.tools if t["name"] == "rag_search")
+    assert rs["timeout_sec"] == 30
+    # description должен иметь явный сигнал что это RAG / корпус
+    assert ("RAG" in rs["description"]) or ("корпус" in rs["description"])
+    assert rs["schema"]["type"] == "object"
+    assert "query" in rs["schema"]["properties"]
+    assert "k" in rs["schema"]["properties"]
+    assert rs["schema"]["required"] == ["query"]
+    assert rs["schema"]["properties"]["k"]["minimum"] == 1
+    assert rs["schema"]["properties"]["k"]["maximum"] == 10
 
     assert len(api.routes) == 1
     assert api.routes[0]["path"] == "health"
@@ -280,6 +291,137 @@ def test_tool_handles_graph_runtime_error(monkeypatch) -> None:
     )
 
     raw = plugin._tool_analyst_query(query="прогноз нефти на квартал")
+    payload = json.loads(raw)
+    assert "error" in payload
+    assert "RuntimeError" in payload["error"]
+
+
+# =============================================================================
+# _tool_rag_search — input validation
+# =============================================================================
+
+
+def test_rag_search_empty_query_returns_error() -> None:
+    plugin = _import_plugin_module()
+    raw = plugin._tool_rag_search(query="")
+    payload = json.loads(raw)
+    assert payload == {"error": "query is empty"}
+
+
+def test_rag_search_too_long_query_returns_error() -> None:
+    plugin = _import_plugin_module()
+    raw = plugin._tool_rag_search(query="а" * 2500)
+    payload = json.loads(raw)
+    assert "too long" in payload.get("error", "")
+
+
+def test_rag_search_clamps_k_to_max(monkeypatch) -> None:
+    """k > _RAG_MAX_K (10) clamp'ится; tool не падает."""
+    plugin = _import_plugin_module()
+
+    captured_k = {}
+
+    class _FakeHit:
+        def __init__(self, idx):
+            self.chunk_id = f"src__{idx:04d}"
+            self.text = f"chunk {idx}"
+            self.bi_encoder_score = 0.8
+            self.rerank_score = 0.8
+            self.metadata = {
+                "source_id": "src",
+                "source_title": "Test source",
+                "section_path": "ch1 > sec1",
+                "page_start": 1,
+                "page_end": 1,
+                "language": "ru",
+                "block": "1_strategy",
+                "type": "annual_report",
+            }
+
+    class _FakeRetriever:
+        def retrieve(self, query, *, k_dense, k_final, **kw):
+            captured_k["k_final"] = k_final
+            return [_FakeHit(i) for i in range(k_final)]
+
+    import sys
+    fake_module = type(sys)("nefteboros.rag.retriever")
+    fake_module.Retriever = _FakeRetriever
+    monkeypatch.setitem(sys.modules, "nefteboros.rag.retriever", fake_module)
+
+    raw = plugin._tool_rag_search(query="любой запрос", k=999)
+    payload = json.loads(raw)
+    assert "error" not in payload
+    assert payload["k"] == 10
+    assert captured_k["k_final"] == 10
+    assert payload["total_returned"] == 10
+
+
+def test_rag_search_happy_path(monkeypatch) -> None:
+    """rag_search с mock'нутым Retriever возвращает корректный JSON shape."""
+    plugin = _import_plugin_module()
+
+    class _FakeHit:
+        def __init__(self):
+            self.chunk_id = "opec_woo_2025__0042"
+            self.text = "OPEC прогнозирует спрос на нефть на уровне 110 mb/d к 2050..."
+            self.bi_encoder_score = 0.785
+            self.rerank_score = 0.785
+            self.metadata = {
+                "source_id": "opec_woo_2025",
+                "source_title": "OPEC World Oil Outlook 2025 (full)",
+                "section_path": "Long-term outlook > Demand projection",
+                "page_start": 142,
+                "page_end": 144,
+                "language": "en",
+                "block": "1_strategy",
+                "type": "institutional_forecast",
+            }
+
+    class _FakeRetriever:
+        def retrieve(self, query, *, k_dense, k_final, **kw):
+            return [_FakeHit() for _ in range(min(k_final, 1))]
+
+    import sys
+    fake_module = type(sys)("nefteboros.rag.retriever")
+    fake_module.Retriever = _FakeRetriever
+    monkeypatch.setitem(sys.modules, "nefteboros.rag.retriever", fake_module)
+
+    raw = plugin._tool_rag_search(query="прогноз спроса на нефть к 2050", k=3)
+    payload = json.loads(raw)
+
+    assert "error" not in payload
+    assert payload["query"] == "прогноз спроса на нефть к 2050"
+    assert payload["k"] == 3
+    assert payload["total_returned"] == 1
+    assert len(payload["chunks"]) == 1
+
+    chunk = payload["chunks"][0]
+    assert chunk["chunk_id"] == "opec_woo_2025__0042"
+    assert chunk["score"] == 0.785
+    assert chunk["source_id"] == "opec_woo_2025"
+    assert chunk["source_title"] == "OPEC World Oil Outlook 2025 (full)"
+    assert chunk["page_start"] == 142
+    assert chunk["page_end"] == 144
+    assert chunk["language"] == "en"
+    assert chunk["block"] == "1_strategy"
+    assert chunk["type"] == "institutional_forecast"
+    assert chunk["text"].startswith("OPEC прогнозирует")
+
+
+def test_rag_search_handles_retriever_error(monkeypatch) -> None:
+    """Если Retriever упал — handler не падает, возвращает error JSON."""
+    plugin = _import_plugin_module()
+
+    class _AngryRetriever:
+        def retrieve(self, *args, **kwargs):
+            raise RuntimeError("Chroma collection not found")
+
+    import sys
+    fake_module = type(sys)("nefteboros.rag.retriever")
+    fake_module.Retriever = lambda: _AngryRetriever()
+    monkeypatch.setitem(sys.modules, "nefteboros.rag.retriever", fake_module)
+
+    raw = plugin._tool_rag_search(query="любой", k=3)
     payload = json.loads(raw)
     assert "error" in payload
     assert "RuntimeError" in payload["error"]
