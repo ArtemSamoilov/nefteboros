@@ -6,9 +6,16 @@ TIER1 — verified business/industry sources с редакторской отв�
         OPEC/IEA/EIA).
 TIER2 — общие деловые/энергетические СМИ.
 BLACKLIST — агрегаторы без оригинального контента, форумы, соцсети,
-            yellow-press источники. Всегда отбрасываются.
+            yellow-press источники + справочники (wikipedia). Всегда
+            отбрасываются.
 Остальные → "other": не блокируется, но помечается, чтобы LLM видел
             «не верифицирован».
+
+**Subdomain-aware matching:** entry `bloomberg.com` ловит `bloomberg.com`,
+`www.bloomberg.com`, `markets.bloomberg.com`, `news.bloomberg.com`. Без
+этого `markets.businessinsider.com` уходил в `other` и tier2-веса
+терялись. Match не fuzzy: `notbloomberg.com` НЕ считается матчем
+(используется `host == entry` или `host.endswith("." + entry)`).
 
 Списки настраиваются через ENV (полное переопределение, не дополнение):
 - NEFTEBOROS_WEB_TIER1_HOSTS=reuters.com,bloomberg.com,...
@@ -65,6 +72,7 @@ _DEFAULT_TIER2 = frozenset({
 })
 
 _DEFAULT_BLACKLIST = frozenset({
+    # Соцсети / форумы / UGC без редакторской ответственности
     "reddit.com",
     "quora.com",
     "facebook.com",
@@ -72,11 +80,16 @@ _DEFAULT_BLACKLIST = frozenset({
     "x.com",
     "vk.com",
     "ok.ru",
-    "zen.yandex.ru",
-    "dzen.ru",
     "pikabu.ru",
     "livejournal.com",
     "medium.com",
+    # Агрегаторы / Zen без редакции
+    "zen.yandex.ru",
+    "dzen.ru",
+    "mail.ru",
+    # Справочники — не источник news (для documentary вопросов есть
+    # rag_search; для свежих новостей wiki не релевантен)
+    "wikipedia.org",
 })
 
 
@@ -106,20 +119,38 @@ def normalize_hostname(host: str) -> str:
     return h
 
 
+def _matches_any(host: str, hosts: frozenset[str]) -> bool:
+    """Subdomain-aware match: host == entry OR host.endswith('.' + entry).
+
+    Точка в `endswith` обязательна — иначе `notreuters.com` ложно
+    матчился бы на `reuters.com`.
+    """
+    if not host:
+        return False
+    for entry in hosts:
+        if host == entry or host.endswith("." + entry):
+            return True
+    return False
+
+
 def classify(host: str) -> str:
-    """Returns 'tier1' | 'tier2' | 'blacklist' | 'other'."""
+    """Returns 'tier1' | 'tier2' | 'blacklist' | 'other'.
+
+    Subdomain-aware: `markets.businessinsider.com` → tier2 через base
+    `businessinsider.com`. См. модуль-docstring.
+    """
     h = normalize_hostname(host)
-    if h in get_blacklist():
+    if _matches_any(h, get_blacklist()):
         return "blacklist"
-    if h in get_tier1():
+    if _matches_any(h, get_tier1()):
         return "tier1"
-    if h in get_tier2():
+    if _matches_any(h, get_tier2()):
         return "tier2"
     return "other"
 
 
 def is_blacklisted(host: str) -> bool:
-    return normalize_hostname(host) in get_blacklist()
+    return _matches_any(normalize_hostname(host), get_blacklist())
 
 
 __all__ = [
