@@ -70,7 +70,6 @@ TOOL_POLICY: Dict[str, str] = {
     "chat_history": POLICY_SKIP,
     "knowledge_read": POLICY_SKIP,
     "knowledge_list": POLICY_SKIP,
-    "web_search": POLICY_SKIP,
     "codebase_digest": POLICY_SKIP,
     "codebase_health": POLICY_SKIP,
     "code_search": POLICY_SKIP,

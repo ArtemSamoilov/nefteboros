@@ -533,7 +533,7 @@ def test_skill_manifest_parses_frontmatter():
         "type: script\n"
         "runtime: python3\n"
         "timeout_sec: 30\n"
-        "requires: [web_search]\n"
+        "requires: [chat_history]\n"
         "permissions: [net]\n"
         "scripts:\n"
         "  - name: fetch.py\n"
@@ -548,7 +548,7 @@ def test_skill_manifest_parses_frontmatter():
     assert manifest.type == "script"
     assert manifest.runtime == "python3"
     assert manifest.timeout_sec == 30
-    assert manifest.requires == ["web_search"]
+    assert manifest.requires == ["chat_history"]
     assert manifest.permissions == ["net"]
     assert len(manifest.scripts) == 1 and manifest.scripts[0]["name"] == "fetch.py"
     assert "Weather skill" in manifest.body

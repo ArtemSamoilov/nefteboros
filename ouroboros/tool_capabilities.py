@@ -46,7 +46,6 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # Knowledge base
     "knowledge_read", "knowledge_write", "knowledge_list",
     # Web
-    "web_search",
     "browse_page", "browser_action", "analyze_screenshot",
     # Communication
     "send_user_message", "send_photo",
@@ -70,7 +69,7 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "repo_read", "repo_list",
     "data_read", "data_list",
     "code_search",
-    "web_search", "codebase_digest", "chat_history",
+    "codebase_digest", "chat_history",
 })
 
 # ---------------------------------------------------------------------------

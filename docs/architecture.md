@@ -106,14 +106,14 @@ sequenceDiagram
 | **Выпиливаем** | Self-modify | `consciousness.py`, `reflection.py`, `deep_self_review.py`, `improvement_backlog.py`, `consolidator.py` | Удалить |
 | | Marketplace | `marketplace*.py` | Удалить |
 | | A2A protocol | `a2a_*.py` | Удалить |
-| **Доменное (новое)** | RAG | `nefteboros/rag/` | TBD |
-| | Forecast | `nefteboros/forecast/` | TBD |
-| | Web search | `nefteboros/search/` | TBD |
-| | LLM-адаптеры | `nefteboros/llm/` | TBD |
-| | LangGraph | `nefteboros/graphs/` | TBD |
-| | Citations validator | `nefteboros/citations/` | TBD |
+| **Доменное (новое)** | RAG | `nefteboros/rag/` | реализован (ADR-0011/0016) |
+| | Forecast | `nefteboros/forecast/` | реализован (ADR-0012/0013) |
+| | Web search | `nefteboros/search/` | реализован (ADR-0022) — Brave + tier-фильтр + lang detection |
+| | LLM-адаптеры | `nefteboros/llm/` | реализован (ADR-0007/0008) |
+| | LangGraph | `nefteboros/graphs/` | реализован (ADR-0014/0015) |
+| | Citations validator | `nefteboros/citations/` | RAG — реализован, web — отдельный PR |
 | | TG bot (свой) | `nefteboros/bot/` | TBD |
-| | Промпты | `nefteboros/prompts/` | TBD |
+| | Промпты | `nefteboros/prompts/` | реализован (ADR-0019) |
 | **Skill** | neftegaz_analyst | `skills/neftegaz_analyst/` | TBD |
 | **Eval** | Скрипты | `scripts/eval/` | TBD |
 | | Датасеты | `datasets/` | TBD |
@@ -144,12 +144,14 @@ classify_intent →
 
 ## Логика фильтрации источников (ТЗ §2.3)
 
-`nefteboros/search/` содержит:
-- **Tier-1 whitelist** (приоритет): Reuters, Bloomberg, FT, S&P Global Platts, Argus Media, Reuters Energy, Wood Mackenzie, RBC, Vedomosti, Kommersant, Interfax
-- **Tier-2** (допустимы с пометкой "secondary"): остальные деловые СМИ
-- **Blacklist** (отброшены): жёлтая пресса, агрегаторы без оригинального контента, форумы
+`nefteboros/search/tiers.py` (см. ADR-0022) содержит:
+- **TIER1** (приоритет): Reuters, Bloomberg, FT, WSJ, Argus Media, S&P Platts, Wood Mackenzie, Energy Intel, Rystad, IEA, OPEC, EIA, РБК, Ведомости, Коммерсант, Интерфакс, ТАСС, OilPrice.
+- **TIER2** (допустимы): CNBC, Forbes, RG.ru, Expert, Neftegaz.ru, Energyland, Lenta.
+- **BLACKLIST** (отбрасываются всегда): Reddit, Quora, соцсети, Dzen/Yandex.zen, LiveJournal, Pikabu, Medium.
 
-Реализация: post-filter по hostname после Brave API.
+Реализация: post-filter по hostname после Brave API. Полная замена через ENV — `NEFTEBOROS_WEB_TIER1_HOSTS=...`, `NEFTEBOROS_WEB_TIER2_HOSTS=...`, `NEFTEBOROS_WEB_BLACKLIST_HOSTS=...`.
+
+Lang detection (`nefteboros/search/lang.py`): доля кириллицы ≥ 30% → RU (Brave `search_lang=ru, country=RU`); иначе EN. RU-запрос ловит RU-tier1, EN — EN-tier1.
 
 ## Эволюция
 

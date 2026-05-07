@@ -161,17 +161,19 @@ def _import_plugin_module():
     return module
 
 
-def test_register_two_tools_and_route() -> None:
-    """register(api) регистрирует analyst_query + rag_search + health route (см. ADR-0018)."""
+def test_register_three_tools_and_route() -> None:
+    """register(api) регистрирует analyst_query + rag_search + web_search + health
+    route (см. ADR-0018, ADR-0022)."""
     plugin = _import_plugin_module()
     api = _CaptureAPI()
     plugin.register(api)
 
-    assert len(api.tools) == 2, (
-        f"expected 2 tools (analyst_query + rag_search), got {[t['name'] for t in api.tools]}"
+    assert len(api.tools) == 3, (
+        f"expected 3 tools (analyst_query + rag_search + web_search), "
+        f"got {[t['name'] for t in api.tools]}"
     )
     tool_names = {t["name"] for t in api.tools}
-    assert tool_names == {"analyst_query", "rag_search"}, f"got: {tool_names}"
+    assert tool_names == {"analyst_query", "rag_search", "web_search"}, f"got: {tool_names}"
 
     aq = next(t for t in api.tools if t["name"] == "analyst_query")
     assert aq["timeout_sec"] == 120
@@ -188,6 +190,18 @@ def test_register_two_tools_and_route() -> None:
     assert rs["schema"]["required"] == ["query"]
     assert rs["schema"]["properties"]["k"]["minimum"] == 1
     assert rs["schema"]["properties"]["k"]["maximum"] == 10
+
+    ws = next(t for t in api.tools if t["name"] == "web_search")
+    assert ws["timeout_sec"] == 20
+    assert ("Brave" in ws["description"]) or ("веб-поиск" in ws["description"].lower())
+    assert ws["schema"]["type"] == "object"
+    assert ws["schema"]["required"] == ["query"]
+    for opt in ("query", "freshness", "k", "tier"):
+        assert opt in ws["schema"]["properties"], f"missing {opt} in web_search schema"
+    assert ws["schema"]["properties"]["k"]["minimum"] == 1
+    assert ws["schema"]["properties"]["k"]["maximum"] == 10
+    assert ws["schema"]["properties"]["freshness"]["enum"] == ["pd", "pw", "pm", "py"]
+    assert ws["schema"]["properties"]["tier"]["enum"] == ["all", "tier1"]
 
     assert len(api.routes) == 1
     assert api.routes[0]["path"] == "health"
