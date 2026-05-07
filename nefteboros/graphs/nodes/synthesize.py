@@ -132,7 +132,15 @@ async def _call_llm(system: str, user: str) -> str:
                 {"role": "user", "content": user},
             ],
             model=model,
-            max_tokens=2048,
+            # Reasoning-style модели (Kimi-k2p6, GLM-5*) тратят значительную
+            # долю output на скрытый ``delta.reasoning_content`` (CoT). При
+            # 2048 токенов виsible ``content`` обрезается до неинформативной
+            # шапки (174 chars) — agent интерпретирует это как «пустой
+            # synthesis». 8192 даёт 1229 chars полного analytical ответа с
+            # CI 80%/95% на forecast-prompt'е (~2k prompt_tokens). Stream-режим
+            # в openai-compatible (см. ouroboros/llm.py chat_async) разблокирует
+            # cap прокси Hydra на 4096.
+            max_tokens=8192,
         )
     except Exception as exc:  # noqa: BLE001 — graph node must not crash
         logger.exception("synthesize: LLM call failed")
