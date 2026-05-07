@@ -497,10 +497,19 @@ def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 90.0
             "worker_pid": boot_evt.get("pid"),
         },
     )
-    if not ok and st.get("owner_chat_id"):
-        send_with_budget(
-            int(st["owner_chat_id"]),
-            f"⚠️ Worker SHA mismatch after spawn: expected {expected_sha[:8]}, got {(observed_sha or 'unknown')[:8]}",
+    if not ok:
+        # nefteboros: в нашем форке self-modification выпилена (ADR-0001).
+        # state.current_sha обновляется только в self-modify-cycle (после
+        # внутреннего коммита Ouroboros). У нас deploy через внешний
+        # `git pull` + systemctl restart → state.json stale → expected_sha
+        # старый, observed_sha (от worker'а после pull) — новый.
+        # Warning формально верный, но **бесполезен** для пользователя в
+        # нашем deployment'е. Запись в supervisor.jsonl остаётся (выше)
+        # для диагностики; в chat не пишем чтобы не засорять UI.
+        log.debug(
+            "worker SHA mismatch (expected %s observed %s) — chat notice "
+            "suppressed in nefteboros fork (self-modify off, see ADR-0001)",
+            expected_sha[:8], (observed_sha or "unknown")[:8],
         )
 
 
