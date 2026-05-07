@@ -23,7 +23,7 @@ DEFAULT_PATH = Path(
         str(Path(__file__).resolve().parent.parent.parent / "data" / "vectorstore"),
     )
 )
-DEFAULT_COLLECTION = os.environ.get("NEFTEBOROS_RAG_COLLECTION", "nefteboros_corpus_v1")
+DEFAULT_COLLECTION = os.environ.get("NEFTEBOROS_RAG_COLLECTION", "nefteboros_corpus_v2_heading")
 
 
 @dataclass
