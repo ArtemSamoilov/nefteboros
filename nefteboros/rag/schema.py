@@ -1,12 +1,45 @@
 """Pydantic-схемы для RAG-pipeline.
 
-См. ADR-0011 (chunking) и ADR-0012 (embed + retrieve, future).
+См. ADR-0011 (chunking) и ADR-0016 (embed + retrieve).
 """
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+# Marker иногда оставляет HTML <span id="..."> в headings — выкидываем
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+# Множественные пробелы → одиночный
+_WS_RE = re.compile(r"\s+")
+# Markdown bold/italic markers вокруг строк
+_MD_FORMAT_RE = re.compile(r"^[*_#>\-\s]+|[*_\s]+$")
+
+
+def _clean_heading(text: str) -> str:
+    """Убирает HTML-теги Marker'а и нормализует пробелы."""
+    text = _HTML_TAG_RE.sub("", text)
+    text = _WS_RE.sub(" ", text).strip()
+    return text
+
+
+def _first_meaningful_line(text: str, *, max_chars: int = 120) -> str:
+    """Первая «значимая» строка content — часто это bold/CAPS заголовок,
+    который Marker не parsed как H2/H3. Помогает дать embedding контекст
+    реального content sub-section, когда chunker присвоил неточный
+    section_path (см. failure analysis в docs/experiments/).
+    """
+    for raw in text.split("\n"):
+        line = _MD_FORMAT_RE.sub("", raw).strip()
+        if not line or line.startswith(("|", "{")):
+            # таблицы / page-маркеры пропускаем
+            continue
+        if len(line) < 10:
+            # слишком короткое (часто артефакты типа "Page 47", "Table 3")
+            continue
+        return line[:max_chars]
+    return ""
 
 Block = Literal["1_strategy", "2_corporate", "3_operational", "4_geopolitics"]
 Language = Literal["ru", "en"]
@@ -63,21 +96,46 @@ class Chunk(BaseModel):
     def text_for_embedding(self, *, with_heading_prefix: bool = False) -> str:
         """Текст, передаваемый эмбеддеру.
 
-        with_heading_prefix=True добавляет prefix вида:
+        with_heading_prefix=True добавляет обогащённый prefix вида:
             [{source_title}]
-            {section_path}
+            {clean_section_path}
+            >>> {first_meaningful_content_line}
 
             {text}
 
-        Это даёт BGE-M3 контекст «откуда» чанк (см. эксперимент в
-        docs/experiments/rag-baseline-v2-heading-prefix.md). Без prefix
-        embedding опирается только на raw content — что для table-only
-        и similar-chunk корпоративных AR даёт SAME_DOC_MISS.
+        Финальная стратегия (после анализа failure cases в
+        docs/experiments/, итерация v3):
+        1. source_title в quадратных скобках — даёт embedder'у явный
+           identifier документа
+        2. section_path очищен от HTML-тегов Marker'а (<span id=...>)
+           и от дубликата source_title в начале
+        3. first_meaningful_line — реальная под-section, которую chunker
+           часто пропускает (bold/CAPS строки не распарсены как H2)
+
+        Без prefix embedding опирается только на raw content — что для
+        table-only и similar-chunk корпоративных AR даёт SAME_DOC_MISS.
         """
         if not with_heading_prefix:
             return self.text
-        sp = self.section_path or "(no section)"
-        return f"[{self.source_title}]\n{sp}\n\n{self.text}"
+        # Чистим section_path
+        sp = _clean_heading(self.section_path or "")
+        # Если section_path начинается с source_title — отрезаем дубликат
+        if sp and self.source_title:
+            stitle_clean = _clean_heading(self.source_title)
+            for sep in (" > ", " — ", " - "):
+                prefix_to_strip = f"{stitle_clean}{sep}"
+                if sp.startswith(prefix_to_strip):
+                    sp = sp[len(prefix_to_strip):]
+                    break
+        sp = sp or "(no section)"
+
+        first_line = _first_meaningful_line(self.text)
+
+        parts = [f"[{self.source_title}]", sp]
+        if first_line:
+            parts.append(f">>> {first_line}")
+        prefix = "\n".join(parts)
+        return f"{prefix}\n\n{self.text}"
 
     def chroma_metadata(self) -> dict:
         """Сериализация в плоский dict для Chroma metadata.
