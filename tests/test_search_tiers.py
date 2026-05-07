@@ -48,11 +48,58 @@ class TestClassifyDefaults:
             ("dzen.ru", "blacklist"),
             ("vk.com", "blacklist"),
             ("zen.yandex.ru", "blacklist"),
+            ("wikipedia.org", "blacklist"),
+            ("mail.ru", "blacklist"),
             ("unknown-blog.example", "other"),
         ],
     )
     def test_classifies_known_hosts(self, host: str, expected_tier: str) -> None:
         assert classify(host) == expected_tier
+
+
+class TestSubdomainMatch:
+    """Subdomain-aware classification: base `bloomberg.com` ловит
+    `markets.bloomberg.com`, но не `notbloomberg.com`."""
+
+    @pytest.mark.parametrize(
+        "host, expected_tier",
+        [
+            # tier1 subdomains
+            ("markets.bloomberg.com", "tier1"),
+            ("news.bloomberg.com", "tier1"),
+            ("uk.reuters.com", "tier1"),
+            ("www.ft.com", "tier1"),
+            ("api.opec.org", "tier1"),
+            # tier2 subdomains — главный кейс из live smoke
+            ("markets.businessinsider.com", "tier2"),
+            ("www.cnbc.com", "tier2"),
+            ("oil.expert.ru", "tier2"),
+            # blacklist subdomains
+            ("ru.wikipedia.org", "blacklist"),
+            ("en.wikipedia.org", "blacklist"),
+            ("finance.mail.ru", "blacklist"),
+            ("news.mail.ru", "blacklist"),
+            ("old.reddit.com", "blacklist"),
+            ("api.dzen.ru", "blacklist"),
+        ],
+    )
+    def test_subdomain_inherits_tier(self, host: str, expected_tier: str) -> None:
+        assert classify(host) == expected_tier
+
+    @pytest.mark.parametrize(
+        "false_suffix",
+        [
+            "notbloomberg.com",
+            "fakereuters.com",
+            "notwikipedia.org",
+            "evilmail.ru",
+            "ftnews.com",  # не должно матчить ft.com
+        ],
+    )
+    def test_false_suffix_not_matched(self, false_suffix: str) -> None:
+        """Без точки в шаблоне `evilmail.ru` ложно матчился бы на
+        `mail.ru`. Проверяем, что endswith идёт ровно по '.' + entry."""
+        assert classify(false_suffix) == "other"
 
 
 class TestEnvOverride:
@@ -75,6 +122,8 @@ class TestEnvOverride:
         monkeypatch.setenv("NEFTEBOROS_WEB_BLACKLIST_HOSTS", "bad.com,evil.org")
         assert get_blacklist() == frozenset({"bad.com", "evil.org"})
         assert is_blacklisted("bad.com")
+        # Subdomain match работает и для ENV-override
+        assert is_blacklisted("foo.bad.com")
         # Дефолтный reddit больше НЕ blacklisted после override
         assert not is_blacklisted("reddit.com")
 
@@ -88,3 +137,12 @@ class TestIsBlacklisted:
         assert is_blacklisted("WWW.REDDIT.COM")
         assert is_blacklisted("www.dzen.ru")
         assert not is_blacklisted("reuters.com")
+
+    def test_subdomain_blacklisted(self) -> None:
+        assert is_blacklisted("ru.wikipedia.org")
+        assert is_blacklisted("finance.mail.ru")
+        assert is_blacklisted("OLD.REDDIT.COM")
+
+    def test_empty_host_not_blacklisted(self) -> None:
+        assert not is_blacklisted("")
+        assert not is_blacklisted("   ")
