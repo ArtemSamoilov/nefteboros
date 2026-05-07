@@ -77,6 +77,8 @@ repo_bundle_manifest.json
 !/data/corpus/.gitkeep
 /data/vectorstore/*
 !/data/vectorstore/.gitkeep
+# Локальные copies экспериментов с разными конфигурациями prefix/embedder
+/data/vectorstore_*/
 /data/markdown/*
 !/data/markdown/.gitkeep
 /data/chunks/*

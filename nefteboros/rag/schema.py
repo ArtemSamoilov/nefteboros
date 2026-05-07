@@ -1,12 +1,45 @@
 """Pydantic-схемы для RAG-pipeline.
 
-См. ADR-0011 (chunking) и ADR-0012 (embed + retrieve, future).
+См. ADR-0011 (chunking) и ADR-0016 (embed + retrieve).
 """
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+# Marker иногда оставляет HTML <span id="..."> в headings — выкидываем
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+# Множественные пробелы → одиночный
+_WS_RE = re.compile(r"\s+")
+# Markdown bold/italic markers вокруг строк
+_MD_FORMAT_RE = re.compile(r"^[*_#>\-\s]+|[*_\s]+$")
+
+
+def _clean_heading(text: str) -> str:
+    """Убирает HTML-теги Marker'а и нормализует пробелы."""
+    text = _HTML_TAG_RE.sub("", text)
+    text = _WS_RE.sub(" ", text).strip()
+    return text
+
+
+def _first_meaningful_line(text: str, *, max_chars: int = 120) -> str:
+    """Первая «значимая» строка content — часто это bold/CAPS заголовок,
+    который Marker не parsed как H2/H3. Помогает дать embedding контекст
+    реального content sub-section, когда chunker присвоил неточный
+    section_path (см. failure analysis в docs/experiments/).
+    """
+    for raw in text.split("\n"):
+        line = _MD_FORMAT_RE.sub("", raw).strip()
+        if not line or line.startswith(("|", "{")):
+            # таблицы / page-маркеры пропускаем
+            continue
+        if len(line) < 10:
+            # слишком короткое (часто артефакты типа "Page 47", "Table 3")
+            continue
+        return line[:max_chars]
+    return ""
 
 Block = Literal["1_strategy", "2_corporate", "3_operational", "4_geopolitics"]
 Language = Literal["ru", "en"]
@@ -59,6 +92,36 @@ class Chunk(BaseModel):
 
     # Topic-tags (от LLM, см. topic_vocabulary.py)
     topic: TopicTags = Field(default_factory=TopicTags)
+
+    def text_for_embedding(self, *, with_heading_prefix: bool = True) -> str:
+        """Текст, передаваемый эмбеддеру.
+
+        with_heading_prefix=True (default) — простой prefix:
+            [{source_title}]
+            {section_path}
+
+            {text}
+
+        Это финальная конфигурация после 4 экспериментов на 95-Q датасете
+        (см. docs/experiments/rag-prefix-experiments.md):
+          v1 baseline (no prefix): chunk_hit@5 = 0.653
+          v2 simple prefix:        chunk_hit@5 = 0.779 ⭐
+          v3 + first_line:         chunk_hit@5 = 0.768 (регресс text_only/table_only)
+          v4 + HTML clean + dedup: chunk_hit@5 = 0.758 (регресс — чистка ослабила сигнал)
+
+        Решение: **v2 (simple) — production default**. Чистка HTML-тегов и
+        dedup source_title сделали хуже, видимо `<span id="page-N">` несли
+        полезный page-сигнал, а двойное упоминание source_title усиливало
+        identity. Меньше manipulations — лучше для BGE-M3.
+
+        Утилиты `_clean_heading()` и `_first_meaningful_line()` оставлены
+        в модуле для возможных будущих экспериментов (например, отдельная
+        конфигурация для table-only chunks).
+        """
+        if not with_heading_prefix:
+            return self.text
+        sp = self.section_path or "(no section)"
+        return f"[{self.source_title}]\n{sp}\n\n{self.text}"
 
     def chroma_metadata(self) -> dict:
         """Сериализация в плоский dict для Chroma metadata.

@@ -75,7 +75,11 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--version", default="v1")
-    p.add_argument("--config", default="bi", choices=["bi", "bi+rerank"])
+    p.add_argument(
+        "--config",
+        default="bi",
+        choices=["bi", "bi+rerank", "bi+topic-boost", "bi+topic-filter", "bi+doc-type", "bi+doc-type-boost"],
+    )
     p.add_argument("--k-dense", type=int, default=30)
     p.add_argument("--k-final", type=int, default=10)
     p.add_argument("--limit", type=int, default=None)
@@ -96,8 +100,20 @@ def main() -> int:
 
     retriever = Retriever()
     rerank = args.config == "bi+rerank"
+    topic_filter = "off"
+    if args.config == "bi+topic-boost":
+        topic_filter = "boost"
+    elif args.config == "bi+topic-filter":
+        topic_filter = "filter"
+    elif args.config == "bi+doc-type":
+        topic_filter = "doc-type"
+    elif args.config == "bi+doc-type-boost":
+        topic_filter = "doc-type-boost"
 
-    log.info("Конфиг: %s | k_dense=%d k_final=%d", args.config, args.k_dense, args.k_final)
+    log.info(
+        "Конфиг: %s | k_dense=%d k_final=%d | rerank=%s topic_filter=%s",
+        args.config, args.k_dense, args.k_final, rerank, topic_filter,
+    )
 
     per_question_results: list[dict] = []
 
@@ -110,6 +126,7 @@ def main() -> int:
             k_dense=args.k_dense,
             k_final=args.k_final,
             rerank=rerank,
+            topic_filter=topic_filter,
         )
         chunk_ids = [h.chunk_id for h in hits]
         source_ids = [h.metadata.get("source_id", "") for h in hits]
