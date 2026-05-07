@@ -17,6 +17,11 @@ BLACKLIST — агрегаторы без оригинального конте�
 терялись. Match не fuzzy: `notbloomberg.com` НЕ считается матчем
 (используется `host == entry` или `host.endswith("." + entry)`).
 
+**Tier-first override:** `classify()` проверяет tier1/tier2 ДО blacklist —
+это даёт whitelist полезных subdomain'ов под blacklisted-корнями.
+Пример: `mail.ru` (root) blacklisted, но `finance.mail.ru` явно в TIER2
+(финансовая редакция, не агрегатор) → tier2.
+
 Списки настраиваются через ENV (полное переопределение, не дополнение):
 - NEFTEBOROS_WEB_TIER1_HOSTS=reuters.com,bloomberg.com,...
 - NEFTEBOROS_WEB_TIER2_HOSTS=...
@@ -82,6 +87,13 @@ _DEFAULT_TIER2 = frozenset({
     "asiatimes.com",
     # Финансовые порталы с подбором
     "finance.yahoo.com",
+    # Whitelist-override: finance-редакция под blacklisted-корнем mail.ru.
+    # finance.mail.ru — реальная финансовая редакция (интервью, прогнозы
+    # аналитиков РФ-брокеров, сводки), не путать с news.mail.ru / pulse.mail.ru
+    # которые остаются blacklist через subdomain match `mail.ru`.
+    # Работает за счёт tier-first порядка в classify() — explicit tier
+    # membership имеет приоритет над blacklist subdomain match.
+    "finance.mail.ru",
     # RU general/energy
     "rg.ru",
     "iz.ru",
@@ -187,19 +199,31 @@ def classify(host: str) -> str:
 
     Subdomain-aware: `markets.businessinsider.com` → tier2 через base
     `businessinsider.com`. См. модуль-docstring.
+
+    **Tier-first order** (whitelist-override semantics): сначала проверяем
+    tier1/tier2, потом blacklist. Это даёт способ whitelist'ить полезный
+    subdomain под blacklisted-корнем — например, `finance.mail.ru` явно
+    в TIER2, тогда как `mail.ru` (root) и `news.mail.ru` (через subdomain)
+    остаются blacklist. Без override порядка subdomain-match съедал бы
+    explicit tier membership.
     """
     h = normalize_hostname(host)
-    if _matches_any(h, get_blacklist()):
-        return "blacklist"
     if _matches_any(h, get_tier1()):
         return "tier1"
     if _matches_any(h, get_tier2()):
         return "tier2"
+    if _matches_any(h, get_blacklist()):
+        return "blacklist"
     return "other"
 
 
 def is_blacklisted(host: str) -> bool:
-    return _matches_any(normalize_hostname(host), get_blacklist())
+    """True только если итоговая classify(host) == 'blacklist'.
+
+    Учитывает tier-first override — `finance.mail.ru` НЕ blacklisted
+    (он явно в TIER2), хотя `mail.ru` корень в BLACKLIST.
+    """
+    return classify(host) == "blacklist"
 
 
 __all__ = [

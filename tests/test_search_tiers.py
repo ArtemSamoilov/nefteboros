@@ -137,7 +137,7 @@ class TestSubdomainMatch:
             # blacklist subdomains
             ("ru.wikipedia.org", "blacklist"),
             ("en.wikipedia.org", "blacklist"),
-            ("finance.mail.ru", "blacklist"),
+            # finance.mail.ru покрыт TestTierFirstOverride (whitelist в TIER2)
             ("news.mail.ru", "blacklist"),
             ("old.reddit.com", "blacklist"),
             ("api.dzen.ru", "blacklist"),
@@ -203,9 +203,42 @@ class TestIsBlacklisted:
 
     def test_subdomain_blacklisted(self) -> None:
         assert is_blacklisted("ru.wikipedia.org")
-        assert is_blacklisted("finance.mail.ru")
         assert is_blacklisted("OLD.REDDIT.COM")
+        assert is_blacklisted("news.mail.ru")  # generic news aggregator
 
     def test_empty_host_not_blacklisted(self) -> None:
         assert not is_blacklisted("")
         assert not is_blacklisted("   ")
+
+
+class TestTierFirstOverride:
+    """Tier membership имеет приоритет над blacklist subdomain match —
+    whitelist полезных subdomain'ов под blacklisted-корнями.
+
+    Эмпирическая проверка показала: `finance.mail.ru` — финансовая
+    редакция (интервью аналитиков, прогнозы), а не агрегатор. Корень
+    `mail.ru` остаётся blacklist; `news.mail.ru` (general feed без
+    финансовой специализации) — тоже blacklist через subdomain match.
+    """
+
+    def test_finance_mail_ru_whitelisted_to_tier2(self) -> None:
+        assert classify("finance.mail.ru") == "tier2"
+        assert not is_blacklisted("finance.mail.ru")
+
+    def test_mail_ru_root_still_blacklist(self) -> None:
+        assert classify("mail.ru") == "blacklist"
+        assert is_blacklisted("mail.ru")
+
+    def test_news_mail_ru_still_blacklist_via_subdomain(self) -> None:
+        """`news.mail.ru` НЕ в TIER2 → idёт в blacklist через `mail.ru`."""
+        assert classify("news.mail.ru") == "blacklist"
+        assert is_blacklisted("news.mail.ru")
+
+    def test_other_mail_ru_subdomains_still_blacklist(self) -> None:
+        assert classify("pulse.mail.ru") == "blacklist"
+        assert classify("foo.mail.ru") == "blacklist"
+
+    def test_finance_subdomain_of_mail_inherits_tier2(self) -> None:
+        """Если `api.finance.mail.ru` появится — он tier2 через subdomain
+        match с `finance.mail.ru` (которое явно в TIER2)."""
+        assert classify("api.finance.mail.ru") == "tier2"
