@@ -496,7 +496,6 @@ Now write a comprehensive summary:"""
         response, usage = llm.chat(
             messages=messages,
             model=model,
-            max_tokens=4096,
             use_local=_use_local_light,
         )
 

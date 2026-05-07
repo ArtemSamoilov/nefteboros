@@ -62,6 +62,15 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
     "OUROBOROS_HARD_TIMEOUT_SEC": 1800,
     "OUROBOROS_TOOL_TIMEOUT_SEC": 600,
+    # Глобальный default max_tokens (output cap) для LLM-вызовов. По умолчанию
+    # 256_000 — сразу под потолок Kimi-k2p6 / других длинных контекст-моделей,
+    # чтобы artifact-ные limits типа 2048/4096/8192 не обрезали reasoning-style
+    # output. См. ADR-0021. Stream-режим в openai-compatible (chat_async +
+    # _chat_remote) разблокирует Hydra-cap 4096 для non-stream, поэтому 256K
+    # реально проходит. Провайдеры с собственным жёстким cap'ом (Anthropic
+    # ~16384, GigaChat ~16384) сами вернут 400 / clamp при превышении —
+    # тогда нужно переопределять параметром в конкретном вызове.
+    "OUROBOROS_MAX_OUTPUT_TOKENS": 256_000,
     "OUROBOROS_BG_MAX_ROUNDS": 5,
     "OUROBOROS_BG_WAKEUP_MIN": 30,
     "OUROBOROS_BG_WAKEUP_MAX": 7200,
@@ -321,6 +330,22 @@ def direct_provider_review_models_fallback(provider: str) -> list[str]:
     if light_slot and light_slot != main_model:
         return [main_model, light_slot, light_slot]
     return [main_model] * _DIRECT_PROVIDER_REVIEW_RUNS
+
+
+def get_max_output_tokens() -> int:
+    """Return configured global default `max_tokens` (LLM output cap).
+
+    Source of truth — env ``OUROBOROS_MAX_OUTPUT_TOKENS`` (apply_settings_to_env
+    push'ит settings.json → env). На пустое/некорректное значение → default
+    256_000 из ``SETTINGS_DEFAULTS``. См. ADR-0021 — почему именно 256K.
+    """
+    default_val = int(SETTINGS_DEFAULTS["OUROBOROS_MAX_OUTPUT_TOKENS"])
+    raw = os.environ.get("OUROBOROS_MAX_OUTPUT_TOKENS", "")
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default_val
+    return value if value > 0 else default_val
 
 
 def get_review_models() -> list[str]:
@@ -753,7 +778,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACK", "CLAUDE_CODE_MODEL",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
-        "OUROBOROS_TOOL_TIMEOUT_SEC",
+        "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_MAX_OUTPUT_TOKENS",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_EVO_COST_THRESHOLD", "OUROBOROS_WEBSEARCH_MODEL",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",

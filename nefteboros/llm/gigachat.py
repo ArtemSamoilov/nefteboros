@@ -28,7 +28,11 @@ def get_gigachat_chat_model(
     base_url: Optional[str] = None,
     auth_url: Optional[str] = None,
     temperature: float = 0.2,
-    max_tokens: int = 4096,
+    # max_tokens default берётся из ouroboros.config.get_max_output_tokens()
+    # на стороне caller'а; здесь None означает «не передавать в langchain_gigachat,
+    # пусть использует свой default». GigaChat имеет собственный output cap
+    # (~16384 для Max), при превышении сам clamp'ит ответ.
+    max_tokens: Optional[int] = None,
     timeout: int = 60,
     verify_ssl_certs: Optional[bool] = None,
     **kwargs: Any,

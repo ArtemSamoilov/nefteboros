@@ -448,7 +448,7 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
         response, fallback_usage = llm.chat(
             messages=messages,
             model=light_model,
-            max_tokens=8192,
+            # max_tokens omitted — global default via config.get_max_output_tokens (256K)
             reasoning_effort="low",
             no_proxy=True,
         )

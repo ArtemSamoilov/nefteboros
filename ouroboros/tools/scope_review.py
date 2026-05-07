@@ -867,7 +867,7 @@ def _call_scope_llm(prompt: str) -> tuple:
                         messages=messages,
                         model=scope_model,
                         reasoning_effort=scope_effort,
-                        max_tokens=_SCOPE_MAX_TOKENS,
+                        # max_tokens omitted — global default (config.get_max_output_tokens, 256K)
                         temperature=0.2,
                         no_proxy=True,
                     ),
@@ -878,7 +878,7 @@ def _call_scope_llm(prompt: str) -> tuple:
                     messages=messages,
                     model=scope_model,
                     reasoning_effort=scope_effort,
-                    max_tokens=_SCOPE_MAX_TOKENS,
+                    # max_tokens omitted — global default (config.get_max_output_tokens, 256K)
                     temperature=0.2,
                     no_proxy=True,
                 )

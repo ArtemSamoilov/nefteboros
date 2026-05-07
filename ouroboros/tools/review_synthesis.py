@@ -304,7 +304,7 @@ def _call_synthesis_llm(prompt: str, *, ctx: Any = None) -> Optional[str]:
         msg, usage = client.chat(
             messages=[{"role": "user", "content": prompt}],
             model=model,
-            max_tokens=2048,
+            # max_tokens omitted — global default via config.get_max_output_tokens (256K)
             reasoning_effort="low",
             no_proxy=True,
         )

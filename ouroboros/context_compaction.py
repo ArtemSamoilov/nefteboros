@@ -212,7 +212,6 @@ def _summarize_round_batch(
         messages=[{"role": "user", "content": prompt}],
         model=light_model,
         reasoning_effort="low",
-        max_tokens=16384,
         use_local=use_local_light,
     )
     summary_text = resp_msg.get("content") or ""

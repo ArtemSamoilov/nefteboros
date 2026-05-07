@@ -152,7 +152,7 @@ async def _query_model(llm_client: LLMClient, model: str, messages: list, semaph
                 messages=messages,
                 model=model,
                 reasoning_effort="medium",
-                max_tokens=65536,
+                # max_tokens omitted — global default via config.get_max_output_tokens (256K)
                 temperature=0.2,
                 no_proxy=True,
             )

@@ -378,8 +378,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
         try:
             msg, _usage = llm.chat(messages=[{"role": "user", "content": prompt}],
                                    model=summary_model,
-                                   reasoning_effort=CONSOLIDATION_REASONING_EFFORT,
-                                   max_tokens=2048)
+                                   reasoning_effort=CONSOLIDATION_REASONING_EFFORT)
             summary_text = (msg.get("content") or "").strip()
             if _usage.get("cost"):
                 try:
