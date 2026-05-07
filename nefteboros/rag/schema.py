@@ -96,30 +96,28 @@ class Chunk(BaseModel):
     def text_for_embedding(self, *, with_heading_prefix: bool = False) -> str:
         """Текст, передаваемый эмбеддеру.
 
-        with_heading_prefix=True добавляет обогащённый prefix вида:
+        with_heading_prefix=True добавляет prefix вида:
             [{source_title}]
             {clean_section_path}
-            >>> {first_meaningful_content_line}
 
             {text}
 
-        Финальная стратегия (после анализа failure cases в
-        docs/experiments/, итерация v3):
-        1. source_title в quадратных скобках — даёт embedder'у явный
-           identifier документа
-        2. section_path очищен от HTML-тегов Marker'а (<span id=...>)
-           и от дубликата source_title в начале
-        3. first_meaningful_line — реальная под-section, которую chunker
-           часто пропускает (bold/CAPS строки не распарсены как H2)
+        v4 (после v3 регресса в text_only/table_only): только
+        source_title + cleaned section_path. first_meaningful_line
+        из v3 убран — он давал misleading signal на text-only chunks
+        (общие первые фразы) и table-only (table caption уже в section_path).
 
-        Без prefix embedding опирается только на raw content — что для
-        table-only и similar-chunk корпоративных AR даёт SAME_DOC_MISS.
+        Что делает (v4):
+        1. source_title в квадратных скобках — explicit identifier
+        2. section_path очищен от HTML <span id=...> Marker'а
+        3. dedup: если section_path начинается с source_title — отрезаем
+
+        _first_meaningful_line() оставлена в модуле как util — может пригодиться
+        для будущих экспериментов (например, для table-only chunks отдельно).
         """
         if not with_heading_prefix:
             return self.text
-        # Чистим section_path
         sp = _clean_heading(self.section_path or "")
-        # Если section_path начинается с source_title — отрезаем дубликат
         if sp and self.source_title:
             stitle_clean = _clean_heading(self.source_title)
             for sep in (" > ", " — ", " - "):
@@ -128,14 +126,7 @@ class Chunk(BaseModel):
                     sp = sp[len(prefix_to_strip):]
                     break
         sp = sp or "(no section)"
-
-        first_line = _first_meaningful_line(self.text)
-
-        parts = [f"[{self.source_title}]", sp]
-        if first_line:
-            parts.append(f">>> {first_line}")
-        prefix = "\n".join(parts)
-        return f"{prefix}\n\n{self.text}"
+        return f"[{self.source_title}]\n{sp}\n\n{self.text}"
 
     def chroma_metadata(self) -> dict:
         """Сериализация в плоский dict для Chroma metadata.
