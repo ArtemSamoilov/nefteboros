@@ -113,9 +113,9 @@ HTML cleanup `<span id="page-N">` и dedup source_title — **регресс** v
 
 **Меньше manipulations — лучше для BGE-M3.** Простой `[source_title]\n{section_path}\n\n{text}` оказался самым устойчивым. Эвристики (cleanup, first_line) рискуют убрать полезный сигнал.
 
-## Cross-doc miss — нерешённая задача
+## Cross-doc miss — попытались решить, не помогло на нашем датасете
 
-**Роснефть IFRS vs AR (cash flow query)** упорно промахивается во всех 4 версиях:
+**Роснефть IFRS vs AR (cash flow query)** упорно промахивается во всех 4 prefix-версиях:
 
 ```
 Q: «Каков чистый денежный поток от операционной деятельности Роснефти за 2024 год?»
@@ -123,13 +123,40 @@ expected: rosneft_ifrs_12m_2024 (МСФО)
 got top-5: ['rosneft_ar_2024', 'rosneft_ar_2024', 'lukoil_ar_2024', ...]
 ```
 
-В AR Роснефти есть **выжимка финансов с тем же лексикомом**, embedding не отличает от полной МСФО. Никакой prefix-вариант не решил эту проблему.
+В AR Роснефти есть **выжимка финансов с тем же лексикомом**, embedding не отличает от полной МСФО.
 
-**Решение для cross-doc** — другой уровень pipeline:
-1. **Topic-tags filter в retrieval** (через query intent classifier). У нас уже есть теги в metadata чанков, но в retrieval не используются.
-2. **Document type filter** через explicit `where={"type": "financial_report"}` для финансовых запросов.
+### Дополнительные эксперименты — query classifier + retrieval filter/boost
 
-Это отдельный backlog — `feature/rag-topic-filter`.
+После v2 prefix провели 4 дополнительных эксперимента с classifier'ом запроса через kimi-k2p6 (см. `nefteboros/rag/query_classifier.py`):
+
+| Конфиг | Что делает | chunk_hit@5 | Δ vs v2 | Latency |
+|---|---|---:|---:|---|
+| **v2 baseline** | embedding only | **0.779** | — | fast |
+| v2 + topic-boost | bonus +0.05 за каждый matching topic-tag | 0.768 | -1.1 | +5 сек |
+| v2 + topic-filter | strict filter по topic-tags с fallback | 0.768 | -1.1 | +5 сек |
+| v2 + doc-type strict | Chroma `where={"type": {"$in": [...]}}` | 0.663 | **-11.6** | +5 сек |
+| v2 + doc-type boost | bonus +0.10 за совпадение chunk type | 0.705 | -7.4 | +5 сек |
+
+**Доли positive insights:**
+- topic-boost дал **chunk_hit@1 +5.3 п.п.** (0.347 → 0.400) и **source_hit@10 = 100%**
+- doc-type-boost решил critical Роснефть IFRS case (точечно: target теперь на позиции 3, раньше не находился)
+
+**Но overall regression** на ключевой chunk_hit@5.
+
+### Почему не сработало — bias датасета
+
+Q сгенерированы kimi **по конкретному chunk'у** (например AR Лукойл) → ground truth жёстко привязан к этому chunk'у. Classifier при чтении query может дать другой `type` (например `financial_report` для cash-flow query) → filter/boost разносит правильный chunk. На реальных пользовательских запросах эффект мог бы быть позитивным, но мы это не можем измерить на synthetic eval'е.
+
+### Что в коде остаётся (production)
+
+Default `topic_filter='off'` (см. `nefteboros/rag/retriever.py`). 4 опциональных режима остаются как **готовая инфраструктура** для будущего eval'а на manual dataset:
+- `topic_filter='boost'` / `'filter'` — по 5 осям закрытого topic-словаря
+- `topic_filter='doc-type'` — Chroma server-side filter
+- `topic_filter='doc-type-boost'` — soft post-retrieval
+
+Включаются через env `NEFTEBOROS_TOPIC_FILTER=...` или явно в `Retriever.retrieve(topic_filter=...)`.
+
+**Backlog:** **manual eval dataset** (30-50 Q от человека, не знающего корпуса) — это unblock'ает реальную оценку doc-type эффекта.
 
 ## Решение
 
