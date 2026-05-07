@@ -93,39 +93,34 @@ class Chunk(BaseModel):
     # Topic-tags (от LLM, см. topic_vocabulary.py)
     topic: TopicTags = Field(default_factory=TopicTags)
 
-    def text_for_embedding(self, *, with_heading_prefix: bool = False) -> str:
+    def text_for_embedding(self, *, with_heading_prefix: bool = True) -> str:
         """Текст, передаваемый эмбеддеру.
 
-        with_heading_prefix=True добавляет prefix вида:
+        with_heading_prefix=True (default) — простой prefix:
             [{source_title}]
-            {clean_section_path}
+            {section_path}
 
             {text}
 
-        v4 (после v3 регресса в text_only/table_only): только
-        source_title + cleaned section_path. first_meaningful_line
-        из v3 убран — он давал misleading signal на text-only chunks
-        (общие первые фразы) и table-only (table caption уже в section_path).
+        Это финальная конфигурация после 4 экспериментов на 95-Q датасете
+        (см. docs/experiments/rag-prefix-experiments.md):
+          v1 baseline (no prefix): chunk_hit@5 = 0.653
+          v2 simple prefix:        chunk_hit@5 = 0.779 ⭐
+          v3 + first_line:         chunk_hit@5 = 0.768 (регресс text_only/table_only)
+          v4 + HTML clean + dedup: chunk_hit@5 = 0.758 (регресс — чистка ослабила сигнал)
 
-        Что делает (v4):
-        1. source_title в квадратных скобках — explicit identifier
-        2. section_path очищен от HTML <span id=...> Marker'а
-        3. dedup: если section_path начинается с source_title — отрезаем
+        Решение: **v2 (simple) — production default**. Чистка HTML-тегов и
+        dedup source_title сделали хуже, видимо `<span id="page-N">` несли
+        полезный page-сигнал, а двойное упоминание source_title усиливало
+        identity. Меньше manipulations — лучше для BGE-M3.
 
-        _first_meaningful_line() оставлена в модуле как util — может пригодиться
-        для будущих экспериментов (например, для table-only chunks отдельно).
+        Утилиты `_clean_heading()` и `_first_meaningful_line()` оставлены
+        в модуле для возможных будущих экспериментов (например, отдельная
+        конфигурация для table-only chunks).
         """
         if not with_heading_prefix:
             return self.text
-        sp = _clean_heading(self.section_path or "")
-        if sp and self.source_title:
-            stitle_clean = _clean_heading(self.source_title)
-            for sep in (" > ", " — ", " - "):
-                prefix_to_strip = f"{stitle_clean}{sep}"
-                if sp.startswith(prefix_to_strip):
-                    sp = sp[len(prefix_to_strip):]
-                    break
-        sp = sp or "(no section)"
+        sp = self.section_path or "(no section)"
         return f"[{self.source_title}]\n{sp}\n\n{self.text}"
 
     def chroma_metadata(self) -> dict:

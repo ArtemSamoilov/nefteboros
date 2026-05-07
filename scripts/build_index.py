@@ -62,8 +62,11 @@ def main() -> int:
     )
     p.add_argument(
         "--with-heading-prefix",
-        action="store_true",
-        help="Эксперимент: добавить [source_title] + section_path в text перед embedding (см. ADR-0016 / experiments)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Добавить [source_title] + section_path в text перед embedding "
+        "(default: True — выиграл в эксперименте rag-prefix-experiments). "
+        "Используй --no-with-heading-prefix для baseline-сравнения.",
     )
     p.add_argument(
         "--collection",
