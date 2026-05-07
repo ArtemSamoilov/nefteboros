@@ -1505,17 +1505,15 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 try {
                     const resp = await fetch('/api/chat/clear', { method: 'POST', cache: 'no-store' });
                     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    // Очистить DOM bubbles + перетащить пустую history с сервера.
-                    // syncHistory сама ставит historyLoaded = true и retiredTaskIds.clear().
-                    messagesDiv.innerHTML = '';
-                    messagesDiv.appendChild(typingEl);
-                    typingEl.style.display = 'none';
-                    if (typeof syncHistory === 'function') {
-                        await syncHistory({ fromReconnect: true });
-                    }
+                    // Hard reload — самый надёжный способ сбросить in-memory state:
+                    // liveCardRecords (Map с DOM-ссылками на task_summary cards),
+                    // taskUiStates, retiredTaskIds, historyLoaded, inputHistorySeeded —
+                    // всё это closure-state initChat(), точечно очистить рискованно
+                    // (одно забытое — UI «помнит» прошлый разговор). Server уже truncated;
+                    // reload подгрузит чистый history с пустого chat.jsonl.
+                    window.location.reload();
                 } catch (exc) {
                     alert('Не удалось очистить историю: ' + exc);
-                } finally {
                     button.disabled = false;
                 }
             })();
