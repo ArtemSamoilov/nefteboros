@@ -1,61 +1,85 @@
 ---
 name: neftegaz_analyst
-description: Старший аналитик нефтегазового рынка — единый entry-point в analyst LangGraph subgraph (классификация intent + forecast + synthesis).
-version: 0.1.0
+description: Старший аналитик нефтегазового рынка — два независимых tools (analyst_query для forecast/synthesis + rag_search для documentary поиска по 802-чанковому корпусу).
+version: 0.2.0
 type: extension
 entry: plugin.py
 permissions: [tool, route]
 env_from_settings: []
-when_to_use: User asks about oil/gas markets, prices, OPEC+, sanctions, supply/demand, Brent/WTI/Urals/TTF/Henry Hub, forecasts, Russian budget oil prices, Минфин budget formula.
+when_to_use: User asks about oil/gas markets, prices, OPEC+, sanctions, supply/demand, Brent/WTI/Urals/TTF/Henry Hub, forecasts, Russian budget oil prices, факты из отчётов OPEC/IEA/EIA, корпоративные отчёты Газпрома/Роснефти/Лукойла, Энергостратегия РФ, geopolitical analysis.
 ---
 
 # Skill: neftegaz_analyst
 
-Skill — тонкая обёртка вокруг `nefteboros.graphs.analyst_graph` (см. [ADR-0014](../../docs/adr/0014-langgraph-subgraph.md), [ADR-0015](../../docs/adr/0015-llm-disambiguate.md), [ADR-0016](../../docs/adr/0016-forecast-skill.md)). Граф сам делает classify_intent (rule-based + GigaChat-2-Max LLM fallback), вызов `forecast()`, synthesis с дисклеймерами, валидацию цитат. Skill только expose'ит этот pipeline через PluginAPI v1.
+Skill экспортирует **два независимых tools** через PluginAPI v1:
+1. **`analyst_query`** — analyst LangGraph subgraph (classify_intent + forecast + synthesis). См. [ADR-0014](../../docs/adr/0014-langgraph-subgraph.md), [ADR-0015](../../docs/adr/0015-llm-disambiguate.md), [ADR-0016](../../docs/adr/0016-forecast-skill.md).
+2. **`rag_search`** — прямой retrieval из RAG-корпуса (802 chunks, см. [docs/experiments/rag-full-eval-report.md](../../docs/experiments/rag-full-eval-report.md)). Тонкая обёртка над `nefteboros.rag.retriever.Retriever`. См. [ADR-0018](../../docs/adr/0018-rag-search-tool.md).
 
-> Документ — review-pack для трёх AI-ревьюеров `review_skill` pipeline. Реальная инструкция агенту лежит в `tool.description` (которую видит LLM при tool selection). Body здесь — для humans.
+**Multi-tool архитектура** обоснована в ADR-0018: ТЗ §2.4 требует приоритизации RAG → web → forecast как **agent decision** (системный промпт), не fixed graph routing.
+
+> Документ — review-pack для трёх AI-ревьюеров `review_skill` pipeline. Реальная инструкция агенту лежит в `tool.description` каждого tool'а (которую видит LLM при tool selection). Body здесь — для humans.
 
 ## Зарегистрированные surfaces
 
 | Surface | Имя | Назначение |
 |---|---|---|
-| Tool   | `analyst_query` (runtime: `ext_<len>_<token>_analyst_query`) | Единый entry-point. На вход — вопрос пользователя. На выход — JSON с synthesis, intent, citations, validation_warnings, forecast_errors. |
+| Tool   | `analyst_query` | Единый entry-point в analyst graph. На вход — вопрос. На выход — JSON с synthesis, intent, citations, validation_warnings, forecast_errors. |
+| Tool   | `rag_search` | Прямой top-k retrieval из RAG-корпуса. На вход — query + опц. k. На выход — JSON со списком chunks (text, source_title, section_path, page_start/end, score). |
 | Route  | `GET /api/extensions/neftegaz_analyst/health` | healthcheck. Проверяет, что skill загружен. |
 
 UI tab отсутствует — этот skill не предоставляет визуальных компонентов; используется через chat и `/api/state` каталог. Widgets и поверхности UI добавятся в `feature/analyst-ui-widget` (не этот PR).
 
 ## Permissions
 
-- `tool` — `register_tool` (analyst_query).
+- `tool` — `register_tool` × 2 (analyst_query + rag_search).
 - `route` — `register_route` (healthcheck).
 
-Без `widget` (нет UI tab), без `read_settings` (env'ы — `OUROBOROS_MODEL`, `GIGACHAT_*`, `OPENAI_COMPATIBLE_*` — читаются `os.environ` напрямую под graph layer'ом, не PluginAPI).
+Без `widget` (нет UI tab), без `read_settings` (env'ы — `OUROBOROS_MODEL`, `GIGACHAT_*`, `OPENAI_COMPATIBLE_*`, `NEFTEBOROS_RAG_*` — читаются `os.environ` напрямую под graph/retriever layer'ом, не PluginAPI).
+
+## Когда какой tool вызывать
+
+Решает **агент в Ouroboros loop'е** на основе `tool.description` каждого tool'а. Системный промпт (в отдельном PR `feature/system-prompt-analyst`) прописывает приоритизацию из ТЗ §2.4:
+
+| Запрос | Tool |
+|---|---|
+| «Что говорит OPEC про квоты?» | **rag_search** — documentary fact из отчёта |
+| «Стратегия Новатэка по СПГ?» | **rag_search** — корпоративный отчёт |
+| «Прогноз Brent на 3 месяца» | **analyst_query** — расчётный модуль |
+| «Минфин нефтегаздоходы 2026» | **analyst_query** (там РФ-budget логика) или **rag_search** (Минэк прогноз СЭР) — агент сам выбирает |
+| «Свежие новости рынка» | (будущий) **web_search** в `feature/web-search-integration` |
+| «Цена Brent + что повлияет» | **rag_search** + **analyst_query** — агент вызывает оба и синтезирует комбинированный ответ |
+| «Криптовалюты» | refusal через `analyst_query` (он умеет out_of_scope) |
 
 ## Архитектура
 
 ```
 Ouroboros loop
+    │  агент видит ДВА tools (+ ВЫБИРАЕТ или вызывает оба):
     │
-    │ tool_call("ext_<len>_<token>_analyst_query", {query: ...})
-    ▼
-plugin.py::_tool_analyst_query(query)
+    ├─► tool_call(analyst_query, {query})
+    │      ▼
+    │   _tool_analyst_query → lazy import analyst_graph
+    │      ▼
+    │   build_analyst_graph().ainvoke(GraphState(query))
+    │      classify_intent → llm_disambiguate? → forecast_call → synthesize → validate
+    │      ▼
+    │   JSON {synthesis, intent, citations, validation_warnings, forecast_errors}
     │
-    │ lazy import nefteboros.graphs.analyst_graph
-    │
-    ▼
-build_analyst_graph().ainvoke(GraphState(query))
-    │
-    │ classify_intent (rule-based)
-    │   ↓ no_keyword_match → llm_disambiguate (GigaChat-2-Max)
-    │ forecast_call (lazy import forecast() — pandas/statsmodels stack)
-    │ synthesize (ouroboros.llm router → kimi-k2 / gigachat / etc)
-    │ validate_citations
-    │
-    ▼
-JSON {synthesis, intent, citations, validation_warnings, forecast_errors}
+    └─► tool_call(rag_search, {query, k=5})
+           ▼
+        _tool_rag_search → lazy import Retriever
+           ▼
+        Retriever().retrieve(query, k_dense=30, k_final=k)
+           BGE-M3 embed → Chroma top-30 → top-k (heading prefix v2 default)
+           ▼
+        JSON {query, k, total_returned, chunks: [{text, source_title, section_path, page_start, page_end, score, ...}]}
 ```
 
-Lazy import графа критически важен: при cold-start Ouroboros (особенно в CI без domain deps) skill manifest парсится без триггера тяжёлых импортов; pandas/numpy/statsmodels/yfinance/sklearn/langgraph/langchain-gigachat подгружаются только при реальном tool-call.
+**Lazy import критически важен** для обоих tools — при cold-start Ouroboros (особенно в CI без domain deps) skill manifest парсится без триггера тяжёлых импортов:
+- `analyst_query`: pandas/numpy/statsmodels/yfinance/sklearn/langgraph/langchain-gigachat
+- `rag_search`: chromadb/sentence-transformers/torch (модели BGE-M3 ~2.3 ГБ)
+
+Подгружаются только при реальном tool-call.
 
 ## Безопасность
 
