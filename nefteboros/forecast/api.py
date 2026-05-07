@@ -160,7 +160,12 @@ def _forecast_observable(
         )
 
     # Apply log-transform (для газовых рядов с экстремумами)
-    use_log = meta.log_transform and (history > 0).all()
+    # `(history > 0).all()` returns ``numpy.bool_`` (pandas Series.all()), not
+    # Python ``bool``. Python ``and`` returns the second operand as-is, so
+    # ``use_log`` stays ``numpy.bool_``. Pydantic v2 + numpy 2.x cannot
+    # serialize ``numpy.bool_`` in ``model_dump(mode="json")``, which crashes
+    # the synthesize node downstream. ``bool(...)`` coerces to native Python.
+    use_log = bool(meta.log_transform and (history > 0).all())
     if use_log:
         history_for_model = np.log(history)
         history_for_model.name = history.name
