@@ -573,6 +573,15 @@ class LLMClient:
         Applies to both the Anthropic path (synchronous requests.Session run in
         a thread) and the OpenAI-compatible async path (httpx.AsyncClient with
         trust_env=False and empty mounts).
+
+        For the ``openai-compatible`` provider (e.g. Hydra-proxied Cloud.ru/JOI
+        models) the call is forced into stream mode. The proxy caps non-stream
+        ``max_tokens`` at 4096 with a hard 400 (``"Requests with max_tokens > 4096
+        must have stream=true"``); review pipeline routinely passes 65536, so
+        stream is the only working path. Bonus: standard SDK only accumulates
+        ``delta.content``, so the vendor-specific ``delta.reasoning_content``
+        (chain-of-thought of Kimi/GLM) is silently dropped — exactly what
+        downstream parsers want.
         """
         if tools:
             raise ValueError("chat_async does not support tool calls")
@@ -589,6 +598,7 @@ class LLMClient:
                 temperature,
                 no_proxy,
             )
+        use_stream = target.get("provider") == "openai-compatible"
         if no_proxy:
             import httpx
             from openai import AsyncOpenAI
@@ -612,6 +622,9 @@ class LLMClient:
                 kwargs = self._build_remote_kwargs(
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
                 )
+                if use_stream:
+                    payload = await self._collect_stream_response(_oa_client, kwargs)
+                    return self._normalize_remote_response(payload, target, skip_cost_fetch=True)
                 resp = await _oa_client.chat.completions.create(**kwargs)
                 return self._normalize_remote_response(resp.model_dump(), target, skip_cost_fetch=True)
             finally:
@@ -623,8 +636,61 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
+        if use_stream:
+            payload = await self._collect_stream_response(client, kwargs)
+            return self._normalize_remote_response(payload, target)
         resp = await client.chat.completions.create(**kwargs)
         return self._normalize_remote_response(resp.model_dump(), target)
+
+    @staticmethod
+    async def _collect_stream_response(
+        client: Any, kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Stream the chat completion and reassemble into a non-stream payload.
+
+        Mirrors the shape of ``resp.model_dump()`` from a non-stream call so
+        ``_normalize_remote_response`` works unchanged. Only ``delta.content``
+        is accumulated; vendor extensions like ``delta.reasoning_content`` are
+        ignored. Usage is taken from the final chunk emitted under
+        ``stream_options={"include_usage": True}``.
+        """
+        stream_kwargs = dict(kwargs)
+        stream_kwargs["stream"] = True
+        stream_kwargs["stream_options"] = {"include_usage": True}
+        content_parts: List[str] = []
+        role = "assistant"
+        finish_reason: Optional[str] = None
+        usage: Dict[str, Any] = {}
+        response_id = ""
+        response_model = str(stream_kwargs.get("model") or "")
+        stream = await client.chat.completions.create(**stream_kwargs)
+        async for chunk in stream:
+            data = chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk or {})
+            response_id = str(data.get("id") or response_id)
+            response_model = str(data.get("model") or response_model)
+            for choice in data.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    content_parts.append(str(delta["content"]))
+                if delta.get("role"):
+                    role = str(delta["role"])
+                if choice.get("finish_reason"):
+                    finish_reason = str(choice["finish_reason"])
+            chunk_usage = data.get("usage")
+            if isinstance(chunk_usage, dict) and chunk_usage:
+                usage = chunk_usage
+        return {
+            "id": response_id,
+            "model": response_model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": role, "content": "".join(content_parts)},
+                    "finish_reason": finish_reason or "stop",
+                }
+            ],
+            "usage": usage,
+        }
 
     def _prepare_messages_for_local_context(
         self,
