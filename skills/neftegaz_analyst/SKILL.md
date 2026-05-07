@@ -1,10 +1,11 @@
 ---
 name: neftegaz_analyst
 description: Старший аналитик нефтегазового рынка — три независимых tools (analyst_query для forecast/synthesis + rag_search для documentary поиска по 802-чанковому корпусу + web_search через Brave с tier-фильтрацией и auto language detection).
-version: 0.3.0
+version: 0.3.1
 type: extension
 entry: plugin.py
-permissions: [tool, route]
+timeout_sec: 60
+permissions: [net, tool, route]
 env_from_settings: []
 when_to_use: User asks about oil/gas markets, prices, OPEC+, sanctions, supply/demand, Brent/WTI/Urals/TTF/Henry Hub, forecasts, Russian budget oil prices, факты из отчётов OPEC/IEA/EIA, корпоративные отчёты Газпрома/Роснефти/Лукойла, Энергостратегия РФ, geopolitical analysis, свежие новости рынка / spot-цены / заявления регуляторов.
 ---
@@ -33,7 +34,8 @@ UI tab отсутствует — этот skill не предоставляет
 
 ## Permissions
 
-- `tool` — `register_tool` × 3 (analyst_query + rag_search + web_search).
+- `net` — outbound HTTP. Используется (a) `analyst_query` через `yfinance`/`EIA API`/`MOEX ISS` для forecast и через `langchain-gigachat` для LLM disambiguate; (b) `rag_search` использует только локальный Chroma (но shared deps могут притянуть HTTP); (c) `web_search` напрямую через `httpx` к `api.search.brave.com`.
+- `tool` — `register_tool` × 3 (analyst_query + rag_search + web_search). PluginAPI v1 на runtime namespace'ит имена в формат `ext_<len>_<token>_<name>` (см. [`ouroboros/extension_loader.py:13`](../../ouroboros/extension_loader.py)) — изолируя skill-tools от core-tool registry.
 - `route` — `register_route` (healthcheck).
 
 Без `widget` (нет UI tab), без `read_settings` (env'ы — `OUROBOROS_MODEL`, `GIGACHAT_*`, `OPENAI_COMPATIBLE_*`, `NEFTEBOROS_RAG_*` — читаются `os.environ` напрямую под graph/retriever layer'ом, не PluginAPI).
