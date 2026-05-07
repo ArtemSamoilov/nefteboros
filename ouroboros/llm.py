@@ -669,6 +669,7 @@ class LLMClient:
         usage: Dict[str, Any] = {}
         response_id = ""
         response_model = str(stream_kwargs.get("model") or "")
+        tool_calls_accum: Dict[int, Dict[str, Any]] = {}
         stream = await client.chat.completions.create(**stream_kwargs)
         async for chunk in stream:
             data = chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk or {})
@@ -680,18 +681,28 @@ class LLMClient:
                     content_parts.append(str(delta["content"]))
                 if delta.get("role"):
                     role = str(delta["role"])
+                if delta.get("tool_calls"):
+                    LLMClient._accumulate_tool_calls(tool_calls_accum, delta["tool_calls"])
                 if choice.get("finish_reason"):
                     finish_reason = str(choice["finish_reason"])
             chunk_usage = data.get("usage")
             if isinstance(chunk_usage, dict) and chunk_usage:
                 usage = chunk_usage
+        message: Dict[str, Any] = {"role": role, "content": "".join(content_parts)}
+        if tool_calls_accum:
+            tool_calls = []
+            for idx in sorted(tool_calls_accum.keys()):
+                tc = dict(tool_calls_accum[idx])
+                tc.pop("index", None)
+                tool_calls.append(tc)
+            message["tool_calls"] = tool_calls
         return {
             "id": response_id,
             "model": response_model,
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": role, "content": "".join(content_parts)},
+                    "message": message,
                     "finish_reason": finish_reason or "stop",
                 }
             ],
@@ -1620,6 +1631,37 @@ class LLMClient:
         return self._normalize_remote_response(resp.model_dump(), target)
 
     @staticmethod
+    def _accumulate_tool_calls(
+        accum: Dict[int, Dict[str, Any]], delta_tool_calls: List[Dict[str, Any]]
+    ) -> None:
+        """Merge a chunk's ``delta.tool_calls`` fragment into ``accum``.
+
+        Streaming spec: each chunk carries a list of partial ``tool_calls``
+        objects keyed by ``index``. Fragments accumulate per-index — ``id``,
+        ``type`` and ``function.name`` come early, ``function.arguments``
+        arrive char-by-char across chunks. We rebuild the full call by
+        appending arguments and overwriting other fields.
+        """
+        for tc in delta_tool_calls or []:
+            if not isinstance(tc, dict):
+                continue
+            idx = tc.get("index")
+            if idx is None:
+                continue
+            slot = accum.setdefault(int(idx), {"index": int(idx)})
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            if tc.get("type"):
+                slot["type"] = tc["type"]
+            fn_delta = tc.get("function") or {}
+            if fn_delta:
+                fn_slot = slot.setdefault("function", {"name": "", "arguments": ""})
+                if fn_delta.get("name"):
+                    fn_slot["name"] = fn_delta["name"]
+                if fn_delta.get("arguments"):
+                    fn_slot["arguments"] = fn_slot.get("arguments", "") + str(fn_delta["arguments"])
+
+    @staticmethod
     def _collect_stream_response_sync(
         client: Any, kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -1627,12 +1669,21 @@ class LLMClient:
 
         Same rationale: openai-compatible (Hydra) caps non-stream ``max_tokens``
         at 4096; stream removes the cap. Vendor extension ``delta.reasoning_content``
-        is dropped by the standard SDK iterator (we only accumulate ``delta.content``).
+        is dropped by the standard SDK iterator (we only accumulate ``delta.content``
+        and ``delta.tool_calls``).
+
+        **Tool calls support:** when the model returns tool calls instead of
+        text content, ``delta.content`` is empty but ``delta.tool_calls``
+        carries the call fragments — accumulated via
+        :meth:`_accumulate_tool_calls`. Without this branch the main agent
+        loop sees an empty response on tool-calling turns and falls back to
+        the next provider (which fails if no fallback creds are configured).
         """
         stream_kwargs = dict(kwargs)
         stream_kwargs["stream"] = True
         stream_kwargs["stream_options"] = {"include_usage": True}
         content_parts: List[str] = []
+        tool_calls_accum: Dict[int, Dict[str, Any]] = {}
         role = "assistant"
         finish_reason: Optional[str] = None
         usage: Dict[str, Any] = {}
@@ -1648,18 +1699,30 @@ class LLMClient:
                     content_parts.append(str(delta["content"]))
                 if delta.get("role"):
                     role = str(delta["role"])
+                if delta.get("tool_calls"):
+                    LLMClient._accumulate_tool_calls(tool_calls_accum, delta["tool_calls"])
                 if choice.get("finish_reason"):
                     finish_reason = str(choice["finish_reason"])
             chunk_usage = data.get("usage")
             if isinstance(chunk_usage, dict) and chunk_usage:
                 usage = chunk_usage
+        message: Dict[str, Any] = {"role": role, "content": "".join(content_parts)}
+        if tool_calls_accum:
+            # Sort by index, drop the index field from emitted tool_calls
+            # (matches non-stream response shape).
+            tool_calls = []
+            for idx in sorted(tool_calls_accum.keys()):
+                tc = dict(tool_calls_accum[idx])
+                tc.pop("index", None)
+                tool_calls.append(tc)
+            message["tool_calls"] = tool_calls
         return {
             "id": response_id,
             "model": response_model,
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": role, "content": "".join(content_parts)},
+                    "message": message,
                     "finish_reason": finish_reason or "stop",
                 }
             ],
