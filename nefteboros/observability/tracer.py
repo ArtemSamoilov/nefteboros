@@ -172,7 +172,19 @@ class _Tracer:
         OpenTelemetry: client.start_observation(...) / span.update(...) /
         span.end() / client.flush(). Auth check на init — `auth_check()` —
         чтобы при плохих ключах не пытаться отправлять данные на каждый span.
+
+        ВНИМАНИЕ (refactor 2026-05-08): инициализация всегда отключена.
+        Реальная отправка в Langfuse идёт через native `@langfuse.observe`
+        декоратор в `nefteboros/observability/__init__.py` — он правильно
+        управляет OTel context'ом, иерархией и content auto-capture. Эта
+        функция оставлена для совместимости (атрибут `_langfuse_client`
+        проверяется в legacy-блоках start_span/end_span/start_trace/end_trace
+        — они скипаются при `_langfuse_enabled=False`). См. ADR-0025.
         """
+        # SDK инициализация ниже отключена — все Langfuse-вызовы идут через
+        # langfuse.observe в __init__.py.
+        return
+        # ----- legacy code ниже не выполняется -----
         flag = os.environ.get("LANGFUSE_ENABLED", "true").strip().lower()
         if flag in ("false", "0", "no", ""):
             return
@@ -541,16 +553,23 @@ class _Tracer:
                     as_type="span",
                     input={"query": query} if query else None,
                 )
-                # Sessions / user attribution в Langfuse — проставляем
-                # через set_trace_io если доступно (4.x API).
+                # Trace-level метаданные через update_trace(...). Без него
+                # trace.name в Langfuse UI берётся из последнего span'а
+                # (на проде получалось «forecast_call» вместо «user_request»).
                 try:
-                    if session_id and hasattr(root_obs, "update_trace"):
-                        root_obs.update_trace(session_id=session_id, user_id=user_id, metadata=metadata)
-                    elif self._langfuse_client and hasattr(self._langfuse_client, "update_current_trace"):
-                        # Fallback на client-level update_current_trace.
-                        pass
-                except Exception:  # noqa: BLE001 — best-effort
-                    pass
+                    if hasattr(root_obs, "update_trace"):
+                        ut_kwargs: dict[str, Any] = {"name": name}
+                        if session_id:
+                            ut_kwargs["session_id"] = session_id
+                        if user_id:
+                            ut_kwargs["user_id"] = user_id
+                        if metadata:
+                            ut_kwargs["metadata"] = metadata
+                        if query:
+                            ut_kwargs["input"] = {"query": query}
+                        root_obs.update_trace(**ut_kwargs)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("update_trace failed: %s", exc)
                 self._langfuse_traces[lf_trace_id] = root_obs
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Langfuse root observation start failed: %s", exc)
@@ -597,8 +616,13 @@ class _Tracer:
             try:
                 root_obs = self._langfuse_traces.pop(trace.trace_id, None)
                 if root_obs is not None:
+                    final_output = (
+                        trace.answer_full
+                        if trace.answer_full is not None
+                        else ({"answer": answer} if answer else None)
+                    )
                     root_obs.update(
-                        output=trace.answer_full if trace.answer_full is not None else {"answer": answer},
+                        output=final_output,
                         metadata={
                             "total_latency_ms": total_ms,
                             "total_cost_usd": record["total_cost_usd"],
@@ -607,6 +631,12 @@ class _Tracer:
                         },
                         level="ERROR" if trace.status == "error" else "DEFAULT",
                     )
+                    # Trace-level output (для UI отображения «final answer»):
+                    if hasattr(root_obs, "update_trace") and final_output is not None:
+                        try:
+                            root_obs.update_trace(output=final_output)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("update_trace(output) failed: %s", exc)
                     root_obs.end()
                 if self._langfuse_client is not None:
                     self._langfuse_client.flush()
@@ -672,12 +702,29 @@ class _Tracer:
                 if parent_lf is None:
                     parent_lf = self._langfuse_traces.get(trace.trace_id)
 
+                # ВАЖНО (Langfuse SDK 4.x): `parent.start_observation(name=..)`
+                # НЕ передаёт name/input в Langfuse — поля приходят как None
+                # (проверено через legacy.observations_v1 endpoint).
+                # Используем `client.start_observation(trace_context={"trace_id":...,
+                # "parent_span_id": parent.id})` — это явно указывает parent
+                # и сохраняет name/input/output корректно.
                 if parent_lf is not None:
-                    lf_span = parent_lf.start_observation(
-                        name=node,
-                        as_type=as_type,
-                        input=full_input,
-                    )
+                    parent_id = getattr(parent_lf, "id", None)
+                    if parent_id:
+                        lf_span = self._langfuse_client.start_observation(
+                            trace_context={
+                                "trace_id": trace.trace_id,
+                                "parent_span_id": parent_id,
+                            },
+                            name=node,
+                            as_type=as_type,
+                            input=full_input,
+                        )
+                    else:
+                        # parent без .id — fallback через метод
+                        lf_span = parent_lf.start_observation(
+                            name=node, as_type=as_type, input=full_input
+                        )
                 else:
                     # Top-level (нет ни parent span'а ни registered root) —
                     # привязываем к trace_id напрямую (legacy fallback).
@@ -855,12 +902,17 @@ def log_llm_usage(
     model: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> None:
-    """Прикрепить tokens/cost к текущему span'у.
+    """Прикрепить tokens/cost к текущему span'у (JSON-trace + Langfuse).
+
+    Внутренне:
+    1. Заполнить поля Span dataclass для JSON-trace.
+    2. Если запущен внутри `@observe(as_type="generation")` Langfuse-span'а —
+       прокинуть usage_details / cost_details через `client.update_current_generation`.
 
     Args:
         usage: ouroboros usage dict (prompt_tokens / completion_tokens / cost
                / resolved_model / provider) или langchain usage_metadata
-               (input_tokens / output_tokens). Если None — no-op.
+               (input_tokens / output_tokens). None → no-op.
         model: имя модели, если не указано в usage.
         provider: провайдер ('hydra' / 'gigachat' / ...), если не в usage.
     """
@@ -868,46 +920,71 @@ def log_llm_usage(
         return
 
     span = _current_span.get()
-    if span is None:
-        # LLM-вызов вне @observe-узла. Логировать некуда. Это не критично —
-        # бывает в unit-тестах. В production-графе все LLM-вызовы под узлами.
-        logger.debug("log_llm_usage called outside span context — ignored")
-        return
-
-    # ouroboros: usage["prompt_tokens"] / "completion_tokens" / "resolved_model" / "provider" / "cost"
-    # langchain: usage["input_tokens"] / "output_tokens"
+    # ouroboros: prompt_tokens / completion_tokens / resolved_model / provider / cost
+    # langchain: input_tokens / output_tokens
     prompt_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
     completion_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
     cached_tokens = usage.get("cached_tokens") or 0
 
-    if prompt_tokens is not None:
-        span.prompt_tokens = int(prompt_tokens)
-    if completion_tokens is not None:
-        span.completion_tokens = int(completion_tokens)
-
     resolved_model = model or usage.get("resolved_model") or usage.get("model")
     if resolved_model:
-        # Snip префикс провайдера для display (Langfuse UI показывает model
-        # отдельным полем, "openai-compatible/kimi-k2p6" нечитаемо). Полное имя
-        # сохраним в metadata через provider, а stripped — в model.
         from nefteboros.observability.cost import _strip_provider_prefix
 
-        span.model = _strip_provider_prefix(str(resolved_model))
+        resolved_model = _strip_provider_prefix(str(resolved_model))
     resolved_provider = provider or usage.get("provider")
-    if resolved_provider:
-        span.provider = str(resolved_provider)
 
-    # Cost: сначала из usage (если ouroboros / провайдер посчитал), иначе compute_cost.
     cost = usage.get("cost")
-    if cost is None and span.model and prompt_tokens is not None and completion_tokens is not None:
+    if (
+        cost is None
+        and resolved_model
+        and prompt_tokens is not None
+        and completion_tokens is not None
+    ):
         cost = compute_cost(
-            span.model,
+            resolved_model,
             int(prompt_tokens),
             int(completion_tokens),
             int(cached_tokens),
         )
-    if cost is not None:
-        span.cost_usd = float(cost)
+
+    # 1. JSON-trace: записать в Span dataclass для записи в trace.jsonl.
+    if span is not None:
+        if prompt_tokens is not None:
+            span.prompt_tokens = int(prompt_tokens)
+        if completion_tokens is not None:
+            span.completion_tokens = int(completion_tokens)
+        if resolved_model:
+            span.model = resolved_model
+        if resolved_provider:
+            span.provider = str(resolved_provider)
+        if cost is not None:
+            span.cost_usd = float(cost)
+    else:
+        logger.debug("log_llm_usage: no current span (JSON-trace skipped)")
+
+    # 2. Langfuse SDK: прокинуть в текущий generation observation.
+    try:
+        from langfuse import get_client
+
+        client = get_client()
+        update_kwargs: dict[str, Any] = {}
+        if resolved_model:
+            update_kwargs["model"] = resolved_model
+        usage_details: dict[str, int] = {}
+        if prompt_tokens is not None:
+            usage_details["input"] = int(prompt_tokens)
+        if completion_tokens is not None:
+            usage_details["output"] = int(completion_tokens)
+        if usage_details:
+            update_kwargs["usage_details"] = usage_details
+        if cost is not None:
+            update_kwargs["cost_details"] = {"total": float(cost)}
+        if update_kwargs:
+            client.update_current_generation(**update_kwargs)
+    except ImportError:
+        pass  # Langfuse not installed — JSON-trace already записан.
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("update_current_generation failed: %s", exc)
 
 
 __all__ = [
