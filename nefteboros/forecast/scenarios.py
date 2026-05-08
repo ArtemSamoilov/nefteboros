@@ -1,42 +1,45 @@
-"""Сценарный режим forecast tool — драйверы, presets, shift-логика.
+"""Сценарный режим forecast tool — Ornstein-Uhlenbeck per scenario.
 
-Реализация Track A1 из roadmap v2.1; обоснования и калибровка — ADR-0023.
+Реализация Track A1 из roadmap v2.1; обоснования и калибровка — ADR-0024.
 
-Архитектура (вариант A из обсуждения 2026-05-08):
-  - base = current shock state (Hormuz blocked, Iran 0.4 mbpd, MOU pending),
-    anchored to spot price через transparent observation-shift к ensemble output.
-  - bear = de-escalation (MOU signed, Hormuz reopens, Iran partial lift) → ~$75-90.
-  - bull = escalation (Hormuz fully closed, regional war expands) → ~$145-175.
+Концептуально (термостат-аналогия):
+  - μ — long-run target per scenario (что 22°C для термостата)
+  - θ — speed of reversion (мощность батареи)
+  - σ — volatility (сквозняки)
+  - μ(t) = μ₀ × (1 + i·t) — target дрейфует с инфляцией
 
-Драйверы (5 шт.) хранят `mbpd_shift` и `usd_per_bbl_shift` per state. Конвертация
-mbpd → $/bbl откалибрована на ~$10-15/bbl per 1 mbpd (Kilian classic + Goldman
-severe scenario implicit).
+OU process:
+  dS = θ(μ(t) - S) dt + σ dW
+  E[S_t]   = μ(t) + (S_0 - μ_0) × exp(-θt)
+  Var[S_t] = σ²/(2θ) × (1 - exp(-2θt))     ← bounded при t→∞
+
+Это даёт actionable CI на длинных horizons (структурное свойство commodity:
+floor cost-of-production, ceiling demand-destruction → mean reversion).
 
 Применимость:
-  - Brent — все драйверы apply (full sensitivity).
-  - WTI — apply, но Hormuz эффект ослаблен (US shale partial isolation premium).
-  - Urals / ESPO / urals_minfin_blend — derived: scenario applies к base Brent,
-    derived layer наследует через `derive_*_forecast()`.
-  - Газ (TTF, henry_hub), russian energy proxy (moexog/gazp/nvtk) — сценарии
-    **не применяются** в v2.1; runtime warning в interpretation.
+  - Нефть (brent, wti, urals, espo, urals_minfin_blend)
+  - Газ (henry_hub, ttf)
+  - MOEX nefтегаз proxy (moexog, gazp, nvtk) — INVERTED bull
+  - opec_basket — fetcher не реализован (P1 backlog)
 
-Snapshot 2026-05-08 — заморожен в CURRENT_STATE_2026_05; обновляется при крупных
-событиях (см. ADR-0023 §«когда обновлять snapshot»).
+Snapshot 2026-05-08 — заморожен в CURRENT_STATE_2026_05; обновляется при
+крупных событиях (см. ADR-0024 §«когда обновлять snapshot»).
 
-См. ADR-0023 — полная карта решений и research-калибровки.
+См. ADR-0024 — полная карта решений и research-калибровки.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 
 # =============================================================================
-# Snapshot 2026-05-08 — заморожен (см. ADR-0023)
+# Snapshot 2026-05-08 — заморожен (см. ADR-0024)
 # =============================================================================
 
 AS_OF_DATE: date = date(2026, 5, 8)
@@ -48,439 +51,246 @@ REVIEW_AFTER_DAYS: int = 14
 FORECAST_RANDOM_STATE: int = 42
 """Глобальный random_state для всего forecast pipeline (A3 reproducibility).
 
-Используется в: GBR.random_state (xgboost_m.py), seed в forecast() и
-forecast_spread() через _seed_for_reproducibility() в api.py."""
+OU detrministic by construction; random_state нужен для backtest infrastructure."""
 
 
 CURRENT_STATE_2026_05: dict[str, str] = {
-    # research-verified, 2026-05-08; источники в ADR-0023
+    # Snapshot текущего состояния рынка (2026-05-08, research-verified).
+    # Используется для interpretation context, не для расчётов (расчёты — через
+    # ASSET_PARAMS calibration).
     "hormuz": "blocked",
     "iran_sanctions": "maximum_pressure_active",
-    "opec_plus": "gradual_unwinding",  # +206k bpd/мес начиная с May 2026
-    "russia_cap": "active",  # $47.60 G7 / $44.10 EU dynamic — оба активны
-    "china_demand": "base",  # +0.198 mbpd y/y per IEA
-    "brent_spot_observed": "100.06",  # CNBC 2026-05-07
+    "opec_plus": "gradual_unwinding",       # +206k bpd/мес начиная с May 2026
+    "russia_cap": "active",                  # $47.60 G7 / $44.10 EU dynamic
+    "china_demand": "base",                  # +0.198 mbpd y/y per IEA
+    "brent_spot_observed": "100.06",         # CNBC 2026-05-07
 }
 
 
 # =============================================================================
-# Типы драйверов и сценариев
+# Scenario types
 # =============================================================================
-
-DriverHormuz = Literal[
-    "blocked", "partial_reopen", "full_reopen",
-    "partial_closure", "full_closure",
-]
-DriverIran = Literal[
-    "maximum_pressure_active", "partial_lift", "full_lift", "further_tightening"
-]
-DriverOpecPlus = Literal["gradual_unwinding", "accelerated_unwinding", "extended_cuts"]
-DriverRussiaCap = Literal["active", "tightened_dynamic", "removed"]
-DriverChina = Literal["weak", "base", "strong"]
 
 ScenarioName = Literal["base", "bear", "bull"]
-
-
-# =============================================================================
-# Driver lookup — (state) → ($/bbl shift low, mid, high)
-# =============================================================================
-# Источники калибровки — в ADR-0023 §Q2. Каждое число с # source: <ref>.
-# Знак: положительный = поддержка цены, отрицательный = давление вниз.
-# (low, mid, high) трактуется как uniform на [low, high] для CI-convolution.
-
-# Hormuz — strait через который идёт ~25% world seaborne oil
-# Калибровка: full closure — Goldman severe Q4 implies +$25 на 2 mbpd,
-# но full closure это -3..-5 mbpd persistent → +$50..+$75
-_HORMUZ_SHIFT: dict[DriverHormuz, tuple[float, float, float]] = {
-    "blocked": (0.0, 0.0, 0.0),               # current state, anchor reference
-    "partial_reopen": (-22.0, -18.0, -15.0),  # source: Goldman post-ceasefire $90 vs $99 = -$9..-$15 partial
-    "full_reopen": (-45.0, -37.0, -30.0),     # source: full normalization, отыгрывает весь shock-premium
-    # partial_closure: moderate escalation от current blocked — secondary sanctions
-    # на shadow fleet усилены, дополнительный 1-1.5 mbpd off market.
-    # Match: Goldman severe Q4 2026 = $115 при 2 mbpd persistent loss → +$25 mid от base.
-    "partial_closure": (15.0, 22.0, 30.0),
-    # full_closure: tail-risk extreme. Доступен через custom ScenarioParams,
-    # НЕ в bull preset (preset должен быть expected escalation, не worst case).
-    "full_closure": (50.0, 62.0, 75.0),
-}
-
-# Iran экспорт: current = 0.4 mbpd vs pre-war 1.6 mbpd = -1.2 mbpd off market
-_IRAN_SHIFT: dict[DriverIran, tuple[float, float, float]] = {
-    "maximum_pressure_active": (0.0, 0.0, 0.0),  # current
-    "partial_lift": (-10.0, -8.0, -6.0),          # +0.6 mbpd (return к ~1.0); $10/bbl per 1 mbpd
-    "full_lift": (-18.0, -15.0, -12.0),           # +1.2 mbpd (return к 1.6); Kilian classic
-    "further_tightening": (2.0, 2.5, 3.0),        # -0.2 mbpd (already collapsed, marginal effect)
-}
-
-# OPEC+ — 1.65 mbpd voluntary cuts; в апреле 2026 начали +206k bpd/мес unwinding
-_OPEC_PLUS_SHIFT: dict[DriverOpecPlus, tuple[float, float, float]] = {
-    "gradual_unwinding": (0.0, 0.0, 0.0),       # current
-    "accelerated_unwinding": (-15.0, -12.5, -10.0),  # +1.0..+1.5 mbpd ahead of schedule
-    "extended_cuts": (5.0, 6.5, 8.0),            # source: re-tighten +0.5 mbpd cuts; price defense
-}
-
-# Russia cap: $47.60 (G7) / $44.10 (EU dynamic) — оба активны
-# Эффект через price (не volume) — повышает logistics/shadow fleet premium
-_RUSSIA_CAP_SHIFT: dict[DriverRussiaCap, tuple[float, float, float]] = {
-    "active": (0.0, 0.0, 0.0),                  # current
-    "tightened_dynamic": (3.0, 4.0, 5.0),        # source: Bruegel — strict $44.10 enforcement → +supply friction
-    "removed": (-8.0, -6.5, -5.0),               # +0.5 mbpd Russian export normalizes
-}
-
-# China — IEA OMR Feb 2026: +0.198 mbpd 2026 (slow recovery)
-_CHINA_SHIFT: dict[DriverChina, tuple[float, float, float]] = {
-    "weak": (-5.0, -4.0, -3.0),                  # source: -0.4 mbpd from base
-    "base": (0.0, 0.0, 0.0),                      # current trajectory
-    "strong": (3.0, 4.0, 5.0),                    # +0.4 mbpd above base
-}
-
-
-# =============================================================================
-# ScenarioParams — комбинация driver states
-# =============================================================================
+SCENARIO_NAMES: tuple[ScenarioName, ...] = ("base", "bear", "bull")
 
 
 class ScenarioParams(BaseModel):
-    """Комбинация driver states для одного сценария.
+    """Идентификатор сценария.
 
-    Используется как:
-    - один из PRESET_SCENARIOS ("base", "bear", "bull")
-    - custom-комбинация от пользователя
-
-    Линейная суммация driver shifts. Preset калиброван как целое; custom помечается
-    `interpretation`-ом «оценочный, не cross-validated».
-
-    См. ADR-0023 §Q2.
+    В v2.1 (ADR-0024) сценарий задаётся именем (base/bear/bull); per-driver
+    custom комбинации в backlog v2.2. Driver semantics описаны в interpretation.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    hormuz: DriverHormuz = "blocked"
-    iran: DriverIran = "maximum_pressure_active"
-    opec_plus: DriverOpecPlus = "gradual_unwinding"
-    russia_cap: DriverRussiaCap = "active"
-    china: DriverChina = "base"
-
-    # Источник: preset / custom — для honest reporting
-    is_preset: bool = False
+    name: ScenarioName = "base"
 
 
 PRESET_SCENARIOS: dict[ScenarioName, ScenarioParams] = {
-    "base": ScenarioParams(
-        # Текущий shock-режим, anchored to spot ($100)
-        hormuz="blocked",
-        iran="maximum_pressure_active",
-        opec_plus="gradual_unwinding",
-        russia_cap="active",
-        china="base",
-        is_preset=True,
-    ),
-    "bear": ScenarioParams(
-        # De-escalation: MOU подписан, Hormuz reopens частично, Iran частичный lift
-        hormuz="partial_reopen",        # -$15..-$22
-        iran="partial_lift",            # -$6..-$10
-        opec_plus="extended_cuts",      # +$5..+$8 (защита от падения)
-        russia_cap="active",
-        china="base",
-        is_preset=True,
-        # Net delta: -$15..-$25 → если base ~$100 → bear ~$75-90
-        # Соответствует: Goldman post-ceasefire $90, JPM $60 (нижняя граница)
-    ),
-    "bull": ScenarioParams(
-        # Escalation moderate: MOU не подписан, secondary sanctions на shadow
-        # fleet усилены, +1-1.5 mbpd dropped off market. НЕ full Hormuz closure
-        # (full_closure — tail-risk, доступен через custom ScenarioParams).
-        hormuz="partial_closure",       # +$15..+$30 (match Goldman severe)
-        iran="further_tightening",      # +$2..+$3
-        opec_plus="gradual_unwinding",
-        russia_cap="tightened_dynamic", # +$3..+$5
-        china="weak",                   # -$3..-$5 (price-induced demand softening)
-        is_preset=True,
-        # Net delta: ~+$17..+$33 mid от base → если base ~$100 → bull ~$117-133
-        # Match: Goldman severe Q4 2026 = $115 при 2 mbpd persistent loss.
-        # Tail-risk full_closure (+$50..+$75) доступен через custom params.
-    ),
+    "base": ScenarioParams(name="base"),
+    "bear": ScenarioParams(name="bear"),
+    "bull": ScenarioParams(name="bull"),
 }
 
 
 # =============================================================================
-# Asset applicability — какие assets поддерживают сценарии в v2.1
+# OU calibration parameters per asset per scenario (см. ADR-0024)
 # =============================================================================
-# Калибровка _*_SHIFT — для глобальной нефти (Brent reference). Для других:
-#   - WTI: scenarios apply, но Hormuz эффект ослаблен (US shale partial isolation
-#     premium); умножаем Hormuz shift на 0.6 для WTI.
-#   - Urals/ESPO/blend: DERIVED через Brent forecast; scenario applies к Brent,
-#     derived layer наследует автоматически (forecast.api._forecast_derived).
-#   - Газ (TTF, henry_hub): cross-effects от нефтяных шоков нелинейны; v2.1
-#     scenario не применяется, runtime warning.
-#   - Russian energy proxy (moexog, gazp, nvtk): акции — отдельная динамика,
-#     scenario не применяется в v2.1.
 
-_SCENARIO_APPLICABLE_FULL: frozenset[str] = frozenset({
-    "brent",
-    "urals",
-    "espo",
-    "urals_minfin_blend",
-    # urals/espo/blend — DERIVED, scenario propagates через base Brent forecast
-})
 
-_SCENARIO_APPLICABLE_REDUCED: frozenset[str] = frozenset({
-    "wti",
-    # WTI получает ослабленный Hormuz эффект (US shale partial isolation)
-})
+@dataclass(frozen=True)
+class OUParams:
+    """Параметры OU процесса для одного (asset, scenario) пары.
 
-_HORMUZ_REDUCED_FACTOR_WTI: float = 0.6
-"""Множитель Hormuz shift для WTI — отражает US shale partial isolation."""
+    Attributes:
+        mu_0: long-run target в snapshot date (USD/bbl или unit актива).
+        theta: speed of reversion (1/year). Half-life = ln(2)/theta years.
+        sigma: annualized volatility as fraction of spot (e.g. 0.20 для 20%).
+        inflation: nominal inflation rate per year (e.g. 0.05 для 5%).
+        Mu drifts as μ(t) = μ_0 × (1 + inflation × t).
+    """
+
+    mu_0: float
+    theta: float
+    sigma: float
+    inflation: float
+
+
+# Asset → (bear params, base params, bull params)
+# Калибровка research-verified, см. ADR-0024 §«Calibration tables».
+# При обновлении — единое место правки (по convention каждое значение с # source).
+
+# Нефть
+_OIL_INFLATION = 0.05  # nominal: long-run real growth ~2% + CPI ~3% (research)
+ASSET_PARAMS: dict[str, dict[ScenarioName, OUParams]] = {
+    # ----- Нефть -----
+    "brent": {
+        # source bear: Reuters Feb 2026 consensus $63.85 + Goldman post-cease $90 + long-run real $58 → $70
+        # source base: spot $100, Goldman pre-cease $99 → $98 как «текущее shock equilibrium»
+        # source bull: Goldman severe Q4 $115 при 2 mbpd loss + extension → $120
+        # source theta: bear half-life 2.8mo (calm regime fast); base 4.2mo; bull 5.5mo (turbulent slow)
+        # source sigma: pre_war 2021 ~22%, war_shock ~55%, cap_phase ~28%, OVX current ~70% — regime mid
+        "bear": OUParams(mu_0=70.0,  theta=3.0, sigma=0.20, inflation=_OIL_INFLATION),
+        "base": OUParams(mu_0=98.0,  theta=2.0, sigma=0.25, inflation=_OIL_INFLATION),
+        "bull": OUParams(mu_0=120.0, theta=1.5, sigma=0.30, inflation=_OIL_INFLATION),
+    },
+    "wti": {
+        # WTI ~ Brent − $5 typical premium; same volatility regime
+        "bear": OUParams(mu_0=66.0,  theta=3.0, sigma=0.20, inflation=_OIL_INFLATION),
+        "base": OUParams(mu_0=94.0,  theta=2.0, sigma=0.25, inflation=_OIL_INFLATION),
+        "bull": OUParams(mu_0=115.0, theta=1.5, sigma=0.30, inflation=_OIL_INFLATION),
+    },
+    "urals": {
+        # Urals = Brent − sanction-discount per scenario:
+        # bear: Brent$70 − bear discount $8 = $62
+        # base: Brent$98 − base discount $17 (cap_phase_2) = $81
+        # bull: Brent$120 − bull discount $25 = $95
+        # +sigma adjustment +2pp для spread variability
+        "bear": OUParams(mu_0=62.0, theta=3.0, sigma=0.22, inflation=_OIL_INFLATION),
+        "base": OUParams(mu_0=81.0, theta=2.0, sigma=0.27, inflation=_OIL_INFLATION),
+        "bull": OUParams(mu_0=95.0, theta=1.5, sigma=0.32, inflation=_OIL_INFLATION),
+    },
+    "espo": {
+        # ESPO ~ Brent − $5 typical (Asian premium pre-war, normalize sanctions)
+        "bear": OUParams(mu_0=65.0,  theta=3.0, sigma=0.21, inflation=_OIL_INFLATION),
+        "base": OUParams(mu_0=92.0,  theta=2.0, sigma=0.26, inflation=_OIL_INFLATION),
+        "bull": OUParams(mu_0=113.0, theta=1.5, sigma=0.31, inflation=_OIL_INFLATION),
+    },
+    "urals_minfin_blend": {
+        # 0.78 × urals + 0.22 × espo (Минфин НДПИ-формула с 2025-01)
+        "bear": OUParams(mu_0=63.0, theta=3.0, sigma=0.22, inflation=_OIL_INFLATION),
+        "base": OUParams(mu_0=83.0, theta=2.0, sigma=0.27, inflation=_OIL_INFLATION),
+        "bull": OUParams(mu_0=99.0, theta=1.5, sigma=0.32, inflation=_OIL_INFLATION),
+    },
+
+    # ----- Газ -----
+    # source: HH 2022 = 91% real vol, 2023 = 69%; TTF 2022 extreme. Газ inherently
+    # more volatile, slower mean reversion (less liquid markets, regime persists).
+    # Inflation 4%/y — gas substitutable (electric heating, renewables) → lower passthrough
+    "henry_hub": {
+        "bear": OUParams(mu_0=2.30, theta=2.0, sigma=0.35, inflation=0.04),
+        "base": OUParams(mu_0=2.77, theta=1.5, sigma=0.45, inflation=0.04),
+        "bull": OUParams(mu_0=3.50, theta=1.0, sigma=0.55, inflation=0.04),
+    },
+    "ttf": {
+        "bear": OUParams(mu_0=35.0, theta=2.0, sigma=0.35, inflation=0.04),
+        "base": OUParams(mu_0=43.0, theta=1.5, sigma=0.45, inflation=0.04),
+        "bull": OUParams(mu_0=55.0, theta=1.0, sigma=0.50, inflation=0.04),
+    },
+
+    # ----- Российский нефтегаз proxy (INVERTED bull — escalation hurts equity) -----
+    # source: Q1 2022 GAZP −50% YTD при Brent +50% — Russia-specific factors
+    # (sanctions, RUB outflow) доминируют над commodity tailwind.
+    # Inflation 10%/y — RUB equity nominal: CBR rate 16-18% + страновая премия;
+    # частично включает рост цен фон.
+    "moexog": {
+        "bear": OUParams(mu_0=7200.0, theta=2.0, sigma=0.18, inflation=0.10),
+        "base": OUParams(mu_0=6700.0, theta=1.5, sigma=0.22, inflation=0.10),
+        "bull": OUParams(mu_0=5500.0, theta=1.0, sigma=0.30, inflation=0.10),
+    },
+    "gazp": {
+        "bear": OUParams(mu_0=130.0, theta=2.0, sigma=0.20, inflation=0.10),
+        "base": OUParams(mu_0=117.0, theta=1.5, sigma=0.25, inflation=0.10),
+        "bull": OUParams(mu_0=85.0,  theta=1.0, sigma=0.35, inflation=0.10),
+    },
+    "nvtk": {
+        "bear": OUParams(mu_0=1280.0, theta=2.0, sigma=0.22, inflation=0.10),
+        "base": OUParams(mu_0=1124.0, theta=1.5, sigma=0.27, inflation=0.10),
+        "bull": OUParams(mu_0=820.0,  theta=1.0, sigma=0.40, inflation=0.10),
+    },
+}
+
+
+# =============================================================================
+# OU forecast computation
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class OUForecast:
+    """Результат OU forecast для одной точки (target_date)."""
+
+    mid: float
+    ci_80_low: float
+    ci_80_high: float
+    ci_95_low: float
+    ci_95_high: float
+    # Diagnostic
+    mu_t: float          # μ(t) = target с учётом inflation drift
+    raw_anchor: float    # spot − μ_0 (отклонение от long-run target в snapshot)
+
+
+_Z80 = 1.282
+_Z95 = 1.960
+
+
+def compute_ou_forecast(
+    spot: float,
+    params: OUParams,
+    horizon_months: int,
+    *,
+    clip_negative: bool = False,
+) -> OUForecast:
+    """Posчитать OU forecast для одного scenario × horizon.
+
+    Args:
+        spot: текущая spot цена.
+        params: OUParams для scenario × asset.
+        horizon_months: 1/3/6/12.
+        clip_negative: если True — clip ci_low к 0 для price-positive активов.
+
+    Returns:
+        OUForecast с mid + CI 80/95 + диагностикой.
+    """
+    t = horizon_months / 12.0  # convert to years
+    mu_t = params.mu_0 * (1 + params.inflation * t)
+    mid = mu_t + (spot - params.mu_0) * math.exp(-params.theta * t)
+
+    # Variance bounded: σ²/(2θ) × (1 - exp(-2θt))
+    sigma_dollar = params.sigma * spot
+    var = (sigma_dollar ** 2 / (2 * params.theta)) * (1 - math.exp(-2 * params.theta * t))
+    sd = math.sqrt(var)
+
+    ci_80_low = mid - _Z80 * sd
+    ci_80_high = mid + _Z80 * sd
+    ci_95_low = mid - _Z95 * sd
+    ci_95_high = mid + _Z95 * sd
+
+    if clip_negative:
+        ci_80_low = max(0.0, ci_80_low)
+        ci_95_low = max(0.0, ci_95_low)
+        mid = max(0.0, mid)
+
+    return OUForecast(
+        mid=mid,
+        ci_80_low=ci_80_low,
+        ci_80_high=ci_80_high,
+        ci_95_low=ci_95_low,
+        ci_95_high=ci_95_high,
+        mu_t=mu_t,
+        raw_anchor=spot - params.mu_0,
+    )
+
+
+# =============================================================================
+# Asset applicability + helpers
+# =============================================================================
 
 
 def is_scenario_applicable(asset_id: str) -> bool:
-    """True — сценарии можно применять; False — runtime warning + scenario ignored."""
-    return (
-        asset_id in _SCENARIO_APPLICABLE_FULL
-        or asset_id in _SCENARIO_APPLICABLE_REDUCED
-    )
+    """True если asset имеет OU calibration в ASSET_PARAMS."""
+    return asset_id in ASSET_PARAMS
 
 
-# =============================================================================
-# Public API — compute_scenario_delta
-# =============================================================================
-
-
-@dataclass(frozen=True)
-class ScenarioDelta:
-    """Итоговый shift сценария от base ensemble output для одного актива.
-
-    `low`, `mid`, `high` — диапазон shift'а в $/bbl (uniform на [low, high]).
-    `driver_breakdown` — per-driver вклад для interpretation/диагностики.
-    """
-
-    low: float
-    mid: float
-    high: float
-    driver_breakdown: dict[str, tuple[float, float, float]]
-
-
-# Horizon scaling factor — отражает вероятность полной реализации сценария за
-# данный horizon. На 1m вероятность full realization (Hormuz partial closure +
-# Iran tightening + ...) низкая → масштабируем delta. На 12m — высокая prob
-# того что что-то из preset реализуется.
-# Калибровка прагматичная (не probabilistic per driver): cap'нуть extremes на
-# коротких горизонтах. См. ADR-0023 §Q1 v3 «horizon scaling».
-_HORIZON_DELTA_SCALING: dict[int, float] = {
-    1: 0.30,
-    3: 0.50,
-    6: 0.75,
-    12: 1.00,
-}
-
-
-def get_horizon_delta_scaling(horizon_months: int) -> float:
-    """Множитель на scenario delta per horizon (см. ADR-0023 §Q1 v3).
-
-    Линейная интерполяция между точками; вне таблицы — clamp к [0.30, 1.00].
-    """
-    if horizon_months <= 1:
-        return _HORIZON_DELTA_SCALING[1]
-    if horizon_months >= 12:
-        return _HORIZON_DELTA_SCALING[12]
-    if horizon_months in _HORIZON_DELTA_SCALING:
-        return _HORIZON_DELTA_SCALING[horizon_months]
-    # Линейная интерполяция между ближайшими точками
-    keys = sorted(_HORIZON_DELTA_SCALING.keys())
-    for i in range(len(keys) - 1):
-        a, b = keys[i], keys[i + 1]
-        if a <= horizon_months <= b:
-            fa, fb = _HORIZON_DELTA_SCALING[a], _HORIZON_DELTA_SCALING[b]
-            t = (horizon_months - a) / (b - a)
-            return fa + t * (fb - fa)
-    return 1.0
-
-
-def compute_scenario_delta(
-    params: ScenarioParams,
-    asset_id: str,
-    horizon_months: Optional[int] = None,
-) -> ScenarioDelta:
-    """Посчитать итоговый shift сценария относительно base scenario.
-
-    Логика:
-    1. Для base scenario — все driver shifts = 0 (по построению PRESET_SCENARIOS["base"]).
-    2. Для bear/bull/custom — суммируем shifts от каждого driver per state.
-    3. Для WTI — Hormuz shift умножен на _HORMUZ_REDUCED_FACTOR_WTI.
-    4. Если horizon_months передан — применяется horizon scaling factor
-       (отражает вероятность полной реализации сценария).
-
-    Args:
-        params: ScenarioParams с driver states.
-        asset_id: для применения asset-specific корректировок (WTI Hormuz).
-        horizon_months: 1/3/6/12. Если None — без horizon scaling (legacy mode).
-
-    Returns:
-        ScenarioDelta с (low, mid, high) и breakdown (per-driver, без scaling).
-
-    Raises:
-        ValueError: если asset_id не applicable (используй is_scenario_applicable).
-    """
-    if not is_scenario_applicable(asset_id):
-        raise ValueError(
-            f"scenario не применяется к asset_id={asset_id!r} в v2.1 "
-            f"(см. ADR-0023). Используй is_scenario_applicable() для проверки."
+def get_ou_params(asset_id: str, scenario: ScenarioName) -> OUParams:
+    """Lookup OU params для (asset, scenario). Raises KeyError если не найдено."""
+    if asset_id not in ASSET_PARAMS:
+        raise KeyError(
+            f"OU calibration отсутствует для asset_id={asset_id!r}. "
+            f"Доступны: {sorted(ASSET_PARAMS.keys())}"
         )
-
-    breakdown: dict[str, tuple[float, float, float]] = {}
-
-    # Hormuz — asset-aware
-    h_low, h_mid, h_high = _HORMUZ_SHIFT[params.hormuz]
-    if asset_id in _SCENARIO_APPLICABLE_REDUCED:
-        f = _HORMUZ_REDUCED_FACTOR_WTI
-        h_low, h_mid, h_high = h_low * f, h_mid * f, h_high * f
-    breakdown["hormuz"] = (h_low, h_mid, h_high)
-
-    breakdown["iran"] = _IRAN_SHIFT[params.iran]
-    breakdown["opec_plus"] = _OPEC_PLUS_SHIFT[params.opec_plus]
-    breakdown["russia_cap"] = _RUSSIA_CAP_SHIFT[params.russia_cap]
-    breakdown["china"] = _CHINA_SHIFT[params.china]
-
-    # Линейная суммация (raw, без horizon scaling)
-    total_low = sum(t[0] for t in breakdown.values())
-    total_mid = sum(t[1] for t in breakdown.values())
-    total_high = sum(t[2] for t in breakdown.values())
-
-    # Horizon scaling — вероятность полной реализации
-    if horizon_months is not None:
-        scaling = get_horizon_delta_scaling(horizon_months)
-        total_low *= scaling
-        total_mid *= scaling
-        total_high *= scaling
-
-    return ScenarioDelta(
-        low=total_low,
-        mid=total_mid,
-        high=total_high,
-        driver_breakdown=breakdown,
-    )
-
-
-# =============================================================================
-# Base anchor shift — observation-anchored correction для base scenario
-# =============================================================================
-
-
-@dataclass(frozen=True)
-class BaseAnchor:
-    """Observation-anchored shift для base scenario.
-
-    Раскрывает gap между model output и spot. Не из модели — из observation.
-    Прозрачен в metadata + interpretation.
-
-    Используется только для scenario="base" — bear/bull уже от base через delta.
-    """
-
-    raw_model_value: float       # ensemble mean без shift (model belief)
-    observed_spot: float          # last spot из history (proxy для current)
-    anchor_shift: float           # = observed_spot - raw_model_value
-
-
-# Anchor decay по horizon — отражает вероятность того, что current shock state
-# сохранится. На 1m: ~100% probability (один месяц короткий). На 12m: ~15%
-# probability (resolution или дальнейшая эскалация почти неизбежны).
-# Это не «model belief» a priori, а probability-weighted contribution current
-# shock к target_date forecast. См. ADR-0023 §Q1 v3 «anchor decay».
-_HORIZON_ANCHOR_DECAY: dict[int, float] = {
-    1: 1.00,
-    3: 0.70,
-    6: 0.40,
-    12: 0.15,
-}
-
-
-def get_anchor_decay(
-    horizon_months: int,
-    scenario_name: Optional[str] = None,
-) -> float:
-    """Множитель anchor по horizon, scenario-aware.
-
-    Логика scenario-aware decay (ADR-0023 §Q1 v3):
-      - **base**: shock сохраняется → decay по таблице (1m × 1.0, 12m × 0.15).
-        На длинных horizons модель «возвращается к mean reversion».
-      - **bear**: de-escalation → shock выветривается БЫСТРЕЕ. Decay agressive:
-        × 0.5 от base decay. На 1m × 0.5, на 12m × 0.075.
-      - **bull**: escalation → current shock сохраняется + усиливается.
-        Anchor НЕ decays: × 1.0 на всех horizons.
-      - **custom**: применяется base decay (default).
-
-    Args:
-        horizon_months: 1/3/6/12.
-        scenario_name: 'base'/'bear'/'bull'/None (= 'base').
-
-    Returns:
-        Множитель в [0.0, 1.0].
-    """
-    # Base decay по таблице
-    if horizon_months <= 1:
-        base_decay = _HORIZON_ANCHOR_DECAY[1]
-    elif horizon_months >= 12:
-        base_decay = _HORIZON_ANCHOR_DECAY[12]
-    elif horizon_months in _HORIZON_ANCHOR_DECAY:
-        base_decay = _HORIZON_ANCHOR_DECAY[horizon_months]
-    else:
-        keys = sorted(_HORIZON_ANCHOR_DECAY.keys())
-        base_decay = 1.0
-        for i in range(len(keys) - 1):
-            a, b = keys[i], keys[i + 1]
-            if a <= horizon_months <= b:
-                fa, fb = _HORIZON_ANCHOR_DECAY[a], _HORIZON_ANCHOR_DECAY[b]
-                t = (horizon_months - a) / (b - a)
-                base_decay = fa + t * (fb - fa)
-                break
-
-    # Scenario-aware modulation
-    if scenario_name == "bull":
-        return 1.0  # Escalation — current shock сохраняется
-    if scenario_name == "bear":
-        return base_decay * 0.5  # De-escalation — shock выветривается быстрее
-    return base_decay  # base / custom / None
-
-
-def compute_base_anchor(
-    raw_model_value: float,
-    observed_spot: float,
-    horizon_months: Optional[int] = None,
-    scenario_name: Optional[str] = None,
-) -> BaseAnchor:
-    """Посчитать anchor shift для scenario с horizon-aware и scenario-aware decay.
-
-    Anchor = (observed_spot - raw_model_value) — это «shock premium», который
-    модель не схватила. Decay зависит от horizon И scenario:
-      - base: decay по таблице (1m × 1.0, 12m × 0.15)
-      - bear: × 0.5 от base decay (shock выветривается быстрее)
-      - bull: × 1.0 на всех horizons (escalation сохраняет shock)
-
-    Args:
-        raw_model_value: model mean output без shift на target_date.
-        observed_spot: последняя наблюдаемая цена (history.iloc[-1]).
-        horizon_months: 1/3/6/12. Если None — без decay (legacy).
-        scenario_name: 'base'/'bear'/'bull'/None.
-
-    Returns:
-        BaseAnchor с anchor_shift = (spot - raw) × decay(horizon, scenario).
-    """
-    raw_shift = observed_spot - raw_model_value
-    if horizon_months is not None:
-        decay = get_anchor_decay(horizon_months, scenario_name=scenario_name)
-        anchor_shift = raw_shift * decay
-    else:
-        anchor_shift = raw_shift
-    return BaseAnchor(
-        raw_model_value=raw_model_value,
-        observed_spot=observed_spot,
-        anchor_shift=anchor_shift,
-    )
-
-
-# =============================================================================
-# Helpers для парсинга и интерпретации
-# =============================================================================
+    return ASSET_PARAMS[asset_id][scenario]
 
 
 def parse_scenario(
@@ -500,8 +310,7 @@ def parse_scenario(
         if raw not in PRESET_SCENARIOS:
             valid = ", ".join(sorted(PRESET_SCENARIOS.keys()))
             raise ValueError(
-                f"Unknown scenario name {raw!r}. Valid presets: {valid}. "
-                f"Custom — передай ScenarioParams напрямую."
+                f"Unknown scenario name {raw!r}. Valid: {valid}."
             )
         return PRESET_SCENARIOS[raw]
     raise TypeError(
@@ -509,30 +318,54 @@ def parse_scenario(
     )
 
 
-def get_preset_scenario_name(params: ScenarioParams) -> Optional[ScenarioName]:
-    """Если params совпадает с одним из PRESET_SCENARIOS — вернуть имя; иначе None.
-
-    Используется для citation format: `scenario=base|bear|bull` для preset,
-    `scenario=custom` для custom-комбинации.
-    """
-    for name, preset in PRESET_SCENARIOS.items():
-        # Сравниваем по driver полям, не по is_preset (custom может случайно
-        # совпасть с preset по полям — это OK, считаем preset)
-        if (
-            params.hormuz == preset.hormuz
-            and params.iran == preset.iran
-            and params.opec_plus == preset.opec_plus
-            and params.russia_cap == preset.russia_cap
-            and params.china == preset.china
-        ):
-            return name
-    return None
-
-
 def scenario_label(params: ScenarioParams) -> str:
-    """Метка сценария для citation: 'base'/'bear'/'bull' или 'custom'."""
-    name = get_preset_scenario_name(params)
-    return name if name is not None else "custom"
+    """Метка сценария для citation: 'base'/'bear'/'bull'."""
+    return params.name
+
+
+# =============================================================================
+# Driver flags decomposition (для interpretation, не для расчётов)
+# =============================================================================
+# Расчёт идёт через ASSET_PARAMS (μ, θ, σ, infl). Но agent/user может хотеть
+# понять «почему μ_bear именно $70?» — для этого FLAGS_DECOMPOSITION даёт
+# explicit attribution для каждого scenario.
+
+FLAGS_DECOMPOSITION: dict[ScenarioName, dict[str, str]] = {
+    "base": {
+        "hormuz": "blocked (-3 mbpd off market, current state)",
+        "iran": "maximum_pressure_active (Iran exports 0.4 mbpd vs pre-shock 1.6)",
+        "opec_plus": "gradual_unwinding (1.65 mbpd cuts, +206k bpd/мес unwind)",
+        "russia_cap": "active ($47.60 G7 / $44.10 EU dynamic, current)",
+        "china_demand": "base (+0.198 mbpd y/y per IEA)",
+        "summary": "Текущее shock equilibrium. Hormuz crisis сохраняется, no resolution. "
+                   "Brent ~$100, Goldman pre-ceasefire view.",
+    },
+    "bear": {
+        "hormuz": "partial_reopen (+1.5 mbpd back online, MOU signed)",
+        "iran": "partial_lift (Iran exports +0.6 mbpd, sanctions partial)",
+        "opec_plus": "extended_cuts (-0.5 mbpd, defend prices)",
+        "russia_cap": "active (cap binding decreases as spot falls)",
+        "china_demand": "base (+0.2 mbpd, no demand shock)",
+        "summary": "De-escalation: MOU подписан, Hormuz reopens, Iran частично возвращается. "
+                   "Net supply +1.6 mbpd → Brent движется к pre-shock norm $60-70. "
+                   "Match: Goldman post-ceasefire $90, JPM $60 floor.",
+    },
+    "bull": {
+        "hormuz": "partial_closure (-2 mbpd more off market, secondary sanctions tighten)",
+        "iran": "further_tightening (-0.2 mbpd, additional pressure)",
+        "opec_plus": "accelerated_unwinding (+0.5 mbpd faster)",
+        "russia_cap": "tightened_dynamic ($44.10 strict enforcement)",
+        "china_demand": "weak (-0.4 mbpd, price-induced demand softening)",
+        "summary": "Escalation: shock усиливается. Net supply -1.7 mbpd, China -0.4 mbpd → "
+                   "deficit -1.3 mbpd × Kilian elasticity ($12/mbpd) = +$16. "
+                   "Match: Goldman severe Q4 $115 при 2 mbpd loss, наш bull ~$120.",
+    },
+}
+
+
+def get_flags_for_scenario(scenario_name: ScenarioName) -> dict[str, str]:
+    """Driver flags для scenario (используется в interpretation)."""
+    return FLAGS_DECOMPOSITION.get(scenario_name, {})
 
 
 __all__ = [
@@ -540,22 +373,18 @@ __all__ = [
     "REVIEW_AFTER_DAYS",
     "FORECAST_RANDOM_STATE",
     "CURRENT_STATE_2026_05",
-    "get_horizon_delta_scaling",
-    "get_anchor_decay",
-    "DriverHormuz",
-    "DriverIran",
-    "DriverOpecPlus",
-    "DriverRussiaCap",
-    "DriverChina",
     "ScenarioName",
+    "SCENARIO_NAMES",
     "ScenarioParams",
     "PRESET_SCENARIOS",
-    "ScenarioDelta",
-    "BaseAnchor",
-    "compute_scenario_delta",
-    "compute_base_anchor",
+    "OUParams",
+    "OUForecast",
+    "ASSET_PARAMS",
+    "FLAGS_DECOMPOSITION",
+    "compute_ou_forecast",
+    "get_ou_params",
     "is_scenario_applicable",
     "parse_scenario",
-    "get_preset_scenario_name",
     "scenario_label",
+    "get_flags_for_scenario",
 ]
