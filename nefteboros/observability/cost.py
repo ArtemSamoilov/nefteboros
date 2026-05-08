@@ -27,18 +27,26 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+# Курс ₽→$ для пересчёта тарифов GigaChat (которые в ₽ на стороне Сбера).
+# Меняется на FX рынке ежедневно — для observability dashboard'а используем
+# усреднённое значение, точный cost — в LK биллинга. При значимых изменениях
+# курса (>10%) обновлять руками.
+_RUB_USD_RATE = 92.0
+
+
 # (input_per_1m_usd, cached_per_1m_usd, output_per_1m_usd)
 # Если cached_rate==input_rate — провайдер не даёт кеш-скидку.
 #
-# ⚠️ ВНИМАНИЕ: ставки приблизительные. Точные B2B-тарифы Hydra/Cloud.ru
-# и GigaChat не публикуются на open-web (https://hydragpt.ru — закрытый API
-# gateway, https://developers.sber.ru — динамический Next.js). Значения
-# взяты с усреднением известных публикаций и пересчётом через курс ~92 ₽/$.
-# Для production-cost dashboard нужно сверить с биллингом провайдера.
-# В roadmap v2.2: выгрузка в YAML config с возможностью override через env.
+# Источники:
+# - Hydra (Cloud.ru / JOI proxy): https://hydragpt.ru — закрытый API gateway
+#   без public pricing. Ставки approximate, сверить в LK после первого
+#   месяца использования.
+# - GigaChat (Sber): официальные B2B-тарифы 2026-05, переданные Артёмом.
+#   Сбер берёт одинаковую цену за input и output (cached_rate == input_rate
+#   — кеш-скидки нет). См. https://developers.sber.ru/docs/ru/gigachat/api/tariffs.
 COST_RATES: dict[str, tuple[float, float, float]] = {
-    # Hydra → Cloud.ru / JOI proxy. Approximate, проверить в личном кабинете
-    # после первого месяца использования.
+    # --- Hydra → Cloud.ru / JOI proxy (approximate) ---
+    # PRIMARY_LLM_MODEL=kimi-k2p6 — основная модель синтеза.
     "kimi-k2p6": (0.45, 0.45, 1.80),
     "kimi-k2p5": (0.30, 0.30, 1.20),
     "glm-5p1": (0.40, 0.40, 1.60),
@@ -48,14 +56,17 @@ COST_RATES: dict[str, tuple[float, float, float]] = {
     "deepseek-v3p1": (0.27, 0.07, 1.10),
     "minimax-m2p7": (0.35, 0.35, 1.40),
     "gpt-oss-120b": (0.20, 0.20, 0.80),
-    # GigaChat (Sber) B2B tariffs. Approximate, USD/1M tokens (курс 92 ₽/$).
-    # Точные ₽-цены — у Сбера в LK B2B аккаунта. Сверить после первого
-    # месяца биллинга.
-    "GigaChat": (0.22, 0.22, 0.65),
-    "GigaChat-Pro": (0.65, 0.65, 1.96),
-    "GigaChat-Max": (1.30, 1.30, 3.91),
-    "GigaChat-Ultra": (2.61, 2.61, 7.83),
-    "GigaChat-2-Max": (1.30, 1.30, 3.91),
+    # --- GigaChat 2 (Sber) B2B-тарифы 2026-05 ---
+    # 2 Lite: 65 ₽/1M = 0.706 $/1M
+    "GigaChat-2-Lite": (65.0 / _RUB_USD_RATE,) * 3,
+    # 2 Pro: 500 ₽/1M = 5.435 $/1M
+    "GigaChat-2-Pro": (500.0 / _RUB_USD_RATE,) * 3,
+    # 2 Max: 650 ₽/1M = 7.065 $/1M
+    # ROUTING_LLM_MODEL по умолчанию (см. .env.example) и `_DEFAULT_MODEL`
+    # в llm_disambiguate. Алиас "GigaChat-Max" — на случай если provider SDK
+    # резолвит без префикса "2".
+    "GigaChat-2-Max": (650.0 / _RUB_USD_RATE,) * 3,
+    "GigaChat-Max": (650.0 / _RUB_USD_RATE,) * 3,
 }
 
 

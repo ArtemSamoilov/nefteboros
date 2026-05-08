@@ -75,13 +75,37 @@ class TestComputeCost:
         cost = compute_cost("kimi-k2p6", 1000, 500)
         assert cost == pytest.approx(0.00135, rel=1e-3)
 
-    def test_gigachat_max(self):
-        cost = compute_cost("GigaChat-Max", 1000, 500)
-        assert cost is not None and cost > 0
-
     def test_gigachat_2_max(self):
+        """GigaChat 2 Max: 650 ₽/1M @ курс 92 ₽/$ ≈ 7.065 $/1M.
+        Сбер берёт input==output (cached==input, скидки нет).
+        1000 prompt + 500 completion → (1000+500) * 7.065e-6 ≈ 0.0106."""
         cost = compute_cost("GigaChat-2-Max", 1000, 500)
-        assert cost is not None and cost > 0
+        assert cost is not None
+        assert cost == pytest.approx(1500 * 650.0 / 92.0 / 1_000_000.0, rel=1e-3)
+
+    def test_gigachat_max_alias(self):
+        """Алиас GigaChat-Max == GigaChat-2-Max (на случай если SDK
+        резолвит имя без префикса '2')."""
+        c1 = compute_cost("GigaChat-Max", 1000, 500)
+        c2 = compute_cost("GigaChat-2-Max", 1000, 500)
+        assert c1 == c2
+
+    def test_gigachat_2_pro(self):
+        """GigaChat 2 Pro: 500 ₽/1M @ курс 92 ₽/$ ≈ 5.435 $/1M."""
+        cost = compute_cost("GigaChat-2-Pro", 1000, 500)
+        assert cost == pytest.approx(1500 * 500.0 / 92.0 / 1_000_000.0, rel=1e-3)
+
+    def test_gigachat_2_lite(self):
+        """GigaChat 2 Lite: 65 ₽/1M @ курс 92 ₽/$ ≈ 0.706 $/1M."""
+        cost = compute_cost("GigaChat-2-Lite", 1000, 500)
+        assert cost == pytest.approx(1500 * 65.0 / 92.0 / 1_000_000.0, rel=1e-3)
+
+    def test_gigachat_input_equals_output(self):
+        """Свойство Сбера: input и output по одинаковой цене."""
+        # 1000 input only vs 0 input + 1000 output — должны давать тот же cost.
+        c_input_only = compute_cost("GigaChat-2-Max", 1000, 0)
+        c_output_only = compute_cost("GigaChat-2-Max", 0, 1000)
+        assert c_input_only == c_output_only
 
     def test_unknown_model_returns_none(self):
         """Для неизвестной модели — None, не 0. Семантически разные кейсы."""
