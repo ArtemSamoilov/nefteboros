@@ -51,10 +51,23 @@ WEB_PATTERN: re.Pattern[str] = re.compile(
     r"\s+—\s+(?P<host>[^\s,]+),\s*web",
 )
 
-#: Forecast citation: ``[Forecast: model, CI X%]``. ``X`` может быть ``80``
-#: или ``80/95`` (двойной CI). Scenario-поле — отдельным коммитом (Track A).
+#: Forecast citation. Два формата встречаются в v2.0.0:
+#:
+#: - **Spec из SYSTEM.md/ADR-0019**: ``[Forecast: model, CI X%]``
+#: - **Реальный output `synthesize` ноды**: ``[forecast_model:asset@horizon, method, ADR-XXXX]``
+#:   (см. ``nefteboros/graphs/state.py`` ``Citation.tag`` и
+#:   ``nefteboros/graphs/nodes/synthesize.py`` ``_build_forecast_citations``).
+#:
+#: Это **расхождение спецификации и кода** в v2.0.0 — обнаружено при
+#: первом real-baseline'е. Regex покрывает оба, чтобы baseline считался
+#: корректно сейчас, без правки synthesize/SYSTEM.md (отдельный fix).
 FORECAST_PATTERN: re.Pattern[str] = re.compile(
-    r"\[Forecast:\s*(?P<model>[^,\]]+?),\s*CI\s*(?P<ci>[\d/]+%)\]",
+    r"\[(?:"
+    r"Forecast:\s*(?P<model>[^,\]]+?),\s*CI\s*(?P<ci>[\d/]+%)"
+    r"|"
+    r"forecast_model:(?P<asset>[^@\]]+)@(?P<horizon>[^,\]]+)"
+    r"(?:,\s*(?P<method>[^,\]]+))?(?:,\s*(?P<adr>ADR-\d+))?"
+    r")\]",
 )
 
 
@@ -143,13 +156,25 @@ def parse_web_citations(text: str) -> Iterator[ParsedWebCitation]:
 
 
 def parse_forecast_citations(text: str) -> Iterator[ParsedForecastCitation]:
-    """Извлечь все forecast-цитаты."""
+    """Извлечь все forecast-цитаты в одном из двух v2.0.0 форматов."""
     for m in FORECAST_PATTERN.finditer(text):
-        yield ParsedForecastCitation(
-            model=m.group("model").strip(),
-            ci=m.group("ci").strip(),
-            raw=m.group(0),
-        )
+        # Формат 1 (spec): `[Forecast: model, CI X%]`
+        if m.group("model"):
+            yield ParsedForecastCitation(
+                model=m.group("model").strip(),
+                ci=m.group("ci").strip(),
+                raw=m.group(0),
+            )
+        # Формат 2 (реальный graph output): `[forecast_model:asset@horizon, ...]`
+        elif m.group("asset"):
+            method = (m.group("method") or "").strip()
+            asset = m.group("asset").strip()
+            horizon = m.group("horizon").strip()
+            yield ParsedForecastCitation(
+                model=method or f"{asset}@{horizon}",
+                ci="",  # формат 2 не несёт CI в самой цитате
+                raw=m.group(0),
+            )
 
 
 __all__ = [

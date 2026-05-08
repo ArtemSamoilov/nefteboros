@@ -250,9 +250,9 @@ class TestForecastPattern:
     @pytest.mark.parametrize(
         "text",
         [
-            # Без `Forecast:` префикса
+            # Без `Forecast:` или `forecast_model:` префикса
             "[ARIMA, CI 80%]",
-            # Без CI
+            # Spec-формат без CI
             "[Forecast: model]",
             # CI без процента
             "[Forecast: model, CI 80]",
@@ -265,6 +265,23 @@ class TestForecastPattern:
     def test_negative_no_extraction(self, text: str) -> None:
         cites = list(parse_forecast_citations(text))
         assert len(cites) == 0, f"unexpected: {[c.raw for c in cites]}"
+
+    @pytest.mark.parametrize(
+        "text, expected_model",
+        [
+            # Реальный формат `synthesize` ноды (расхождение со spec)
+            ("[forecast_model:brent@3m, ensemble, ADR-0012]", "ensemble"),
+            ("[forecast_model:urals@6m, sarimax, ADR-0012]", "sarimax"),
+            ("[forecast_model:brent@3m]", "brent@3m"),  # без method и ADR
+            ("[forecast_model:urals_minfin_blend@12m]", "urals_minfin_blend@12m"),
+        ],
+    )
+    def test_real_synthesize_format(self, text: str, expected_model: str) -> None:
+        """В v2.0.0 synthesize.py пишет `[forecast_model:asset@horizon, ...]`,
+        не `[Forecast: model, CI X%]` как в SYSTEM.md. Regex покрывает оба."""
+        cites = list(parse_forecast_citations(text))
+        assert len(cites) == 1
+        assert cites[0].model == expected_model
 
 
 # =============================================================================

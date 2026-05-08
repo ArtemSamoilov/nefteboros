@@ -61,6 +61,50 @@ DEFAULT_DATASET = REPO_ROOT / "datasets" / "e2e_dialogues.jsonl"
 METRICS_RUNS_DIR = REPO_ROOT / "metrics" / "runs"
 
 
+def _bootstrap_env() -> None:
+    """Загрузить .env (текущий worktree → parent repo → cwd) и заполнить
+    OPENAI_COMPATIBLE_* из HYDRA_*, если первые не заданы.
+
+    Worktree обычно без своей .env — лежит в parent. Synthesize node
+    использует ``OPENAI_COMPATIBLE_BASE_URL/API_KEY`` (default префикс
+    модели — ``openai-compatible::kimi-k2p6``); в .env у нас
+    ``HYDRA_API_KEY`` + ``HYDRA_BASE_URL``. Auto-mapping избавляет от
+    ручных export перед каждым запуском.
+    """
+    import os
+
+    try:
+        from dotenv import load_dotenv  # type: ignore[import-not-found]
+    except ImportError:
+        return
+
+    # Поднимаемся по дереву от REPO_ROOT до filesystem root — worktree
+    # лежит в .claude/worktrees/<name>/, а реальный .env у parent-репо
+    # ``/Users/.../nefteboros/.env`` (3 уровня вверх).
+    candidates: list[Path] = []
+    cur = REPO_ROOT
+    for _ in range(6):
+        candidates.append(cur / ".env")
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    candidates.append(Path.cwd() / ".env")
+    for p in candidates:
+        if p.exists():
+            load_dotenv(p, override=False)
+            logger.info("loaded env from %s", p)
+            break
+    else:
+        logger.warning("no .env found in candidates: %s", candidates)
+
+    if not os.environ.get("OPENAI_COMPATIBLE_API_KEY") and os.environ.get("HYDRA_API_KEY"):
+        os.environ["OPENAI_COMPATIBLE_API_KEY"] = os.environ["HYDRA_API_KEY"]
+    if not os.environ.get("OPENAI_COMPATIBLE_BASE_URL"):
+        os.environ["OPENAI_COMPATIBLE_BASE_URL"] = os.environ.get(
+            "HYDRA_BASE_URL", "https://hydragpt.ru/v1",
+        )
+
+
 # =============================================================================
 # Run result + per-dialogue score
 # =============================================================================
@@ -221,16 +265,78 @@ class MockRunner:
 
 
 class GraphRunner:
-    """Реальный runner через ``analyst_graph``. Заглушка в Track D-base."""
+    """Реальный runner через ``analyst_graph.build_analyst_graph()``.
+
+    Известное ограничение v2.0.0: ``analyst_graph`` — minimal graph (см.
+    ADR-0014), он покрывает только **forecast** flow и refusal'ы. RAG и
+    Web tools зарегистрированы как skill, но вызываются на уровне
+    Ouroboros tool-loop'а, не внутри LangGraph. Для real e2e на не-forecast
+    диалогах нужен полный Ouroboros loop (отдельный harness через
+    HTTP API ``server.py``).
+
+    На текущем GraphRunner покрытие:
+    - forecast / out_of_scope / russian_gas_refusal — реальный agent run
+    - rag_only / web_only / multi_tool / follow_up / unknown_with_hypothesis
+      / adversarial — agent уйдёт в out_of_scope (нет RAG/web в графе),
+      это **сама по себе** реальная находка.
+    """
+
+    def __init__(self, *, timeout_seconds: float = 90.0) -> None:
+        self._timeout = timeout_seconds
+        self._graph = None  # lazy build
+
+    def _ensure_graph(self):
+        if self._graph is None:
+            from nefteboros.graphs.analyst_graph import build_analyst_graph
+            self._graph = build_analyst_graph()
+        return self._graph
 
     async def run(self, dialogue: dict) -> RunResult:
+        from nefteboros.graphs.state import GraphState, IntentType
+
+        # Используем последнее user сообщение из диалога. Multi-turn
+        # full-context support — отдельная задача (analyst_graph принимает
+        # только query, не messages history).
+        user_messages = [m for m in dialogue["messages"] if m.get("role") == "user"]
+        if not user_messages:
+            return RunResult(answer="", error="no user messages in dialogue")
+        query = user_messages[-1]["content"]
+
+        try:
+            graph = self._ensure_graph()
+            final = await asyncio.wait_for(
+                graph.ainvoke(GraphState(query=query)),
+                timeout=self._timeout,
+            )
+        except asyncio.TimeoutError:
+            return RunResult(answer="", error=f"timeout > {self._timeout}s")
+        except Exception as e:  # noqa: BLE001 — runner не должен падать
+            return RunResult(answer="", error=f"{type(e).__name__}: {e}")
+
+        # Извлекаем что есть в state
+        synthesis = final.get("synthesis", "") or ""
+        intent = final.get("intent")
+        forecast_results = final.get("forecast_results") or []
+
+        # tools_called: analyst_graph покрывает только forecast.
+        tools_called: list[str] = []
+        if forecast_results:
+            tools_called.append("forecast")
+        # rag_search / web_search — НЕ В ГРАФЕ. Реальный baseline покажет
+        # что RAG-only / Web-only диалоги уйдут в out_of_scope — это
+        # ожидаемое (для v2.0.0 minimal-graph) поведение.
+
+        # refused: graph выдаёт refusal через intent type
+        refused = False
+        if intent is not None:
+            intent_type = getattr(intent, "type", None)
+            if intent_type in (IntentType.OUT_OF_SCOPE, IntentType.RUSSIAN_GAS_REFUSAL):
+                refused = True
+
         return RunResult(
-            answer="",
-            error=(
-                "GraphRunner не реализован в Track D-base PR. "
-                "Используй --mock для smoke-baseline; полный e2e — "
-                "в отдельной сессии после Track B / F."
-            ),
+            answer=synthesis,
+            tools_called=tools_called,
+            refused=refused,
         )
 
 
@@ -569,6 +675,7 @@ def main() -> int:
         runner = MockRunner()
         runner_name = "mock"
     else:
+        _bootstrap_env()
         runner = GraphRunner()
         runner_name = "graph"
 
