@@ -80,19 +80,25 @@ Date,Open,High,Low,Close,Adj Close,Volume
 
 ## `e2e_dialogues.jsonl`
 
-Цель: оценка системы целиком (success rate, citation correctness, latency).
+Цель: оценка системы целиком (success rate, citation correctness, structure adherence, refusal rate). Используется в [scripts/eval/eval_e2e.py](../scripts/eval/eval_e2e.py).
 
-Формат:
+Формат (одна строка = один диалог):
 ```json
 {
   "id": "e2e_0001",
   "scenario_type": "rag_only",
-  "user_query": "Что говорит OPEC о квотах добычи в марте 2026?",
   "language": "ru",
+  "held_out": false,
+  "messages": [
+    {"role": "user", "content": "Что говорит OPEC о квотах добычи в марте 2026?"}
+  ],
   "expected_behavior": {
     "should_use_rag": true,
     "should_use_web": false,
     "should_call_forecast": false,
+    "expected_refusal": false,
+    "expected_keywords": ["OPEC", "кво"],
+    "expected_min_citations": 1,
     "must_cite_sources": ["OPEC MOMR"],
     "rubric": [
       "Содержит конкретные цифры из отчёта",
@@ -103,11 +109,30 @@ Date,Open,High,Low,Close,Adj Close,Volume
 }
 ```
 
-Минимум 5 сценариев из ТЗ §4.6:
-1. Ответ на основе отчёта (`scenario_type: "rag_only"`)
-2. Ответ на основе веб-поиска (`scenario_type: "web_only"`)
-3. Комбинированный ответ (`scenario_type: "rag_plus_web"`)
-4. Вызов forecast tool (`scenario_type: "forecast"`)
-5. Out-of-scope (`scenario_type: "out_of_scope"`)
+**Поля:**
 
-Плюс edge cases (3-5 штук для надёжности): неоднозначный запрос, несвежие данные, смешанные источники.
+- `scenario_type` — один из: `rag_only`, `web_only`, `rag_plus_web`, `forecast`, `out_of_scope`, `multi_tool`, `follow_up`, `unknown_with_hypothesis` (запрет на «нет данных»).
+- `held_out` — true для зафиксированного финального замера (не итерируем промпт на этих кейсах). При корпусе из 10 диалогов: 8 dev / 2 held-out.
+- `messages` — список turn'ов в формате OpenAI/Anthropic. Single-turn = один user message; для `follow_up` — два или больше.
+- `expected_behavior.expected_keywords` — substring matches в финальном ответе (case-insensitive, частичный — ловит «квоты»/«квот»/«квотами» через корень «кво»). Базовая, дешёвая проверка.
+- `expected_min_citations` — минимальное число валидных цитат через [citations validator](../nefteboros/citations/). Для `out_of_scope` и `unknown_with_hypothesis` обычно 0.
+- `must_cite_sources` — substring'и в `source_title` chunks/hits, которые **должны** быть процитированы (semantic).
+- `rubric` — текстовые критерии для optional LLM-as-judge оценки. На baseline'е D6 не используется (deterministic substring + structural только).
+
+**Состав корпуса (10 диалогов в первом baseline):**
+
+5 ТЗ-сценариев (по §4.6):
+1. `rag_only` — вопрос про отчёт
+2. `web_only` — свежая новость / spot-цена
+3. `rag_plus_web` — комбо
+4. `forecast` — прогноз с CI
+5. `out_of_scope` — вне нефтегаза
+
+5 multi-tool / edge:
+6. `multi_tool` — RAG + forecast (санкции и Urals)
+7. `multi_tool` — forecast + web (новости + прогноз)
+8. `multi_tool` — RAG + web (отчёт vs свежие новости)
+9. `follow_up` — двухтурный диалог с переиспользованием первого ответа
+10. `unknown_with_hypothesis` — запрос на стыке, агент даёт структурную гипотезу с маркировкой неопределённости (запрет на «нет данных» из roadmap B1)
+
+При расширении до 30-50 — пропорционально увеличить multi-tool / adversarial / hedging кейсы.
