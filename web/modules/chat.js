@@ -1227,7 +1227,13 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     updateMessagesPadding({ preserveStickiness: false });
                     scrollToBottomAfterLayout();
                 }
-                return messages.length > 0;
+                // success-of-fetch, не «есть ли что-то нарисовать». Bootstrap
+                // IIFE использует false как сигнал «server недоступен → fallback
+                // в sessionStorage». Возвращали `messages.length > 0` — на
+                // пустой истории (после `New chat`) IIFE считал sync «не удался»
+                // и подтягивал предыдущий разговор из sessionStorage, из-за чего
+                // кнопка `New chat` визуально ничего не очищала.
+                return true;
             } catch (err) {
                 const socketState = ws?.ws?.readyState;
                 const expectedDisconnect = socketState !== WebSocket.OPEN;
@@ -1505,6 +1511,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 try {
                     const resp = await fetch('/api/chat/clear', { method: 'POST', cache: 'no-store' });
                     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    // Defence-in-depth: sessionStorage хранит persistedHistory
+                    // как fallback при недоступности /api/chat/history. Если её
+                    // не очистить, при reload bootstrap IIFE может загрузить
+                    // её ВМЕСТО серверной (после fix syncHistory return — только
+                    // на реальном fetch-fail; до — даже на success с пустым).
+                    try { sessionStorage.removeItem(CHAT_STORAGE_KEY); } catch {}
                     // Hard reload — самый надёжный способ сбросить in-memory state:
                     // liveCardRecords (Map с DOM-ссылками на task_summary cards),
                     // taskUiStates, retiredTaskIds, historyLoaded, inputHistorySeeded —
