@@ -31,7 +31,10 @@ logger = logging.getLogger(__name__)
 _PROMPT_FILE = (
     pathlib.Path(__file__).resolve().parents[2] / "prompts" / "disambiguate_intent.md"
 )
-_DEFAULT_MODEL = "GigaChat-2-Max"
+# Routing LLM провайдер и модель читаются через nefteboros.llm.router
+# из env-переменных ROUTING_LLM_PROVIDER / ROUTING_LLM_MODEL (см. ADR-0007,
+# .env.example § «Routing LLM»). Раньше тут был hardcoded GigaChat-2-Max
+# который игнорировал env-конфигурацию — fix(graph): wire через router.
 _SYSTEM_PROMPT = (
     "Ты классификатор запросов про нефтегазовый рынок для аналитика Сбера. "
     "Возвращай ТОЛЬКО валидный JSON по schema. Без markdown, без комментариев "
@@ -122,19 +125,19 @@ async def llm_disambiguate(state: GraphState) -> dict[str, Any]:
     при любой ошибке. Узел graph не падает.
     """
     try:
-        from nefteboros.llm.gigachat import get_gigachat_chat_model
+        from nefteboros.llm.router import get_chat_model
     except ImportError as exc:
-        logger.warning("nefteboros.llm.gigachat unavailable: %s", exc)
+        logger.warning("nefteboros.llm.router unavailable: %s", exc)
         return _fallback(state, reason="llm_unavailable_import")
 
     try:
-        chat = get_gigachat_chat_model(
-            model=_DEFAULT_MODEL,
+        chat = get_chat_model(
+            profile="routing",
             temperature=0.0,
             max_tokens=512,
         )
     except (ImportError, ValueError) as exc:
-        logger.warning("GigaChat chat model unavailable: %s", exc)
+        logger.warning("Routing LLM chat model unavailable: %s", exc)
         return _fallback(state, reason="llm_unavailable_creds")
 
     try:

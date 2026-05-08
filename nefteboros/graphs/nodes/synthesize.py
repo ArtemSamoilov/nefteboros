@@ -115,7 +115,33 @@ def _build_citations(state: GraphState) -> list[Citation]:
 
 
 async def _call_llm(system: str, user: str) -> str:
-    """LLM call — graceful degradation на любых ошибках (узел не падает)."""
+    """LLM call — graceful degradation на любых ошибках (узел не падает).
+
+    Использует ``ouroboros.llm.LLMClient`` (НЕ ``nefteboros.llm.router``)
+    потому что:
+
+    1. Stream-поддержка для openai-compatible встроена в ``chat_async`` и
+       sync ``chat`` (см. ADR-0019, ADR-0021): Hydra-прокси требует
+       ``stream=true`` для ``max_tokens > 4096``, а нам нужно 256K чтобы
+       reasoning-style модели (Kimi/GLM) дописали видимый content поверх
+       скрытого ``delta.reasoning_content``.
+
+    2. ``langchain_openai.ChatOpenAI`` (через ``nefteboros.llm.router``)
+       по default идёт через **non-stream** ``.ainvoke()`` — упрётся в
+       Hydra cap 4096 при ``max_tokens=256000``.
+
+    Модель читается из ``OUROBOROS_MODEL`` (settings.json приоритетнее
+    env). Production-конфиг (см. ``docs/deploy/production-config.md``)
+    проставляет ``openai-compatible::kimi-k2p6`` через
+    ``apply_production_config.py`` — synthesize фактически работает на
+    том же Kimi, что и Ouroboros main loop.
+
+    ``PRIMARY_LLM_*`` env-переменные **не используются** в этом callsite
+    (они для router-based вызовов; sole consumer сейчас — llm_disambiguate
+    с profile=routing). Если в будущем поднять streaming в hydra adapter,
+    можно перевести synthesize на router profile=primary и удалить ouroboros.llm
+    из этого узла.
+    """
     try:
         from ouroboros.llm import LLMClient  # type: ignore[import-untyped]
     except ImportError as exc:
