@@ -44,3 +44,10 @@ PyYAML>=6.0                       # уже в ouroboros, но используе
 # --- Eval ---
 scikit-learn>=1.5.0               # для метрик (F1, confusion matrix)
 matplotlib>=3.9.0                 # для plots в forecast eval
+
+# --- Observability (см. ADR-0024) ---
+# Langfuse — серверные трейсы LangGraph узлов, cost/latency dashboard.
+# Опциональная зависимость: при LANGFUSE_ENABLED=false (демо/CI) импорт
+# происходит lazy, отсутствие пакета ломает только Cloud-путь, JSON-trace
+# (metrics/runs/<ts>/trace.jsonl) работает независимо.
+langfuse>=2.0.0
