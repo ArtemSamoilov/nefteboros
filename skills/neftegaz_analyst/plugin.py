@@ -30,6 +30,12 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+# E2E observability — каждый tool вызов открывает top-level trace в Langfuse
+# (см. ADR-0024). Узлы LangGraph subgraph внутри analyst_query прицепятся
+# к этому trace через contextvars. Импорт lazy-friendly: модуль observability
+# зависит только от stdlib + опционально от langfuse SDK.
+from nefteboros.observability import traced_tool
+
 logger = logging.getLogger(__name__)
 
 
@@ -224,12 +230,17 @@ def _serialize_citations(state: Any) -> list[dict[str, Any]]:
     return [c.model_dump() for c in citations]
 
 
+@traced_tool(name="analyst_query")
 def _tool_analyst_query(*, query: str = "") -> str:
     """PluginAPI tool handler. Возвращает JSON-string.
 
     Resilient — не падает на graph error / LLM error / forecast error.
     Возвращает JSON с error-полем, чтобы Ouroboros loop увидел ошибку,
     но не валился.
+
+    E2E trace: top-level `analyst_query` observation от вызова tool до
+    возврата JSON. Span'ы узлов graph (classify_intent, forecast_call,
+    synthesize, validate_citations) прицепляются как child observations.
     """
     cleaned = (query or "").strip()
     if not cleaned:
@@ -317,11 +328,16 @@ def _serialize_rag_hit(hit: Any) -> dict[str, Any]:
     }
 
 
+@traced_tool(name="rag_search")
 def _tool_rag_search(*, query: str = "", k: int = _RAG_DEFAULT_K) -> str:
     """PluginAPI tool handler. Возвращает JSON-string.
 
     Resilient — на любых ошибках (Retriever/Chroma/embedder unavailable)
     возвращает JSON с error-полем, чтобы Ouroboros loop не падал.
+
+    E2E trace: top-level `rag_search` observation от вызова tool до
+    возврата JSON. Сейчас без вложенных span'ов (плоский tool), при
+    добавлении инструментации в Retriever — прицепятся child observations.
     """
     cleaned = (query or "").strip()
     if not cleaned:
@@ -399,6 +415,7 @@ def _serialize_web_hit(hit: Any) -> dict[str, Any]:
     }
 
 
+@traced_tool(name="web_search")
 def _tool_web_search(
     *,
     query: str = "",
@@ -411,6 +428,9 @@ def _tool_web_search(
     Resilient — не падает на сетевых ошибках / 429 / отсутствии ключа.
     Возвращает JSON с error-полем, чтобы Ouroboros loop увидел ошибку,
     но не валился.
+
+    E2E trace: top-level `web_search` observation от вызова tool до
+    возврата JSON.
     """
     cleaned = (query or "").strip()
     if not cleaned:

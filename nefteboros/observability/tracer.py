@@ -280,12 +280,23 @@ class _Tracer:
 
     # --- public API ---
 
-    def start_trace(self, query: Optional[str] = None) -> Trace:
+    def start_trace(
+        self,
+        query: Optional[str] = None,
+        *,
+        name: str = "analyst_request",
+    ) -> Trace:
         """Открыть top-level trace. Не пишет в JSONL сразу — только при end_trace.
 
         В Langfuse 4.x trace = root span/observation. Trace_id генерируется
         SDK через `create_trace_id()`, и все вложенные observations связываются
         через `trace_context={"trace_id": ...}`.
+
+        Args:
+            query: исходный пользовательский запрос (input root observation).
+            name: имя top-level trace в Langfuse. По умолчанию "analyst_request"
+                для analyst_query tool. Для rag_search / web_search tool
+                entry points — соответствующее имя.
         """
         # Langfuse 4.x требует валидный OTel trace_id (16 bytes hex). Используем
         # client.create_trace_id если SDK enabled, иначе обычный UUID.
@@ -309,7 +320,7 @@ class _Tracer:
             try:
                 root_obs = self._langfuse_client.start_observation(
                     trace_context={"trace_id": lf_trace_id},
-                    name="analyst_request",
+                    name=name,
                     as_type="span",
                     input={"query": query},
                 )

@@ -145,15 +145,22 @@ def observe(
     return decorator
 
 
-def start_trace(*, query: Optional[str] = None) -> Trace:
+def start_trace(
+    *, query: Optional[str] = None, name: str = "analyst_request"
+) -> Trace:
     """Открыть top-level trace для одного запроса агента.
 
     Должен вызываться на entry-point (CLI / Telegram bot / Ouroboros tool
     handler) перед `graph.ainvoke(...)`. Span'ы внутри `observe`-декорированных
     узлов привязываются к этому trace через contextvars.
+
+    Args:
+        query: пользовательский запрос (input root observation).
+        name: имя top-level trace в Langfuse UI. По умолчанию analyst_request;
+            для rag_search / web_search tool entry — передавайте соответственно.
     """
     tracer = get_tracer()
-    trace = tracer.start_trace(query=query)
+    trace = tracer.start_trace(query=query, name=name)
     _current_trace.set(trace)
     return trace
 
@@ -168,8 +175,65 @@ def end_trace(trace: Trace, *, answer: Optional[str] = None) -> None:
     tracer.end_trace(trace, answer=answer)
 
 
+def traced_tool(
+    *, name: Optional[str] = None, query_arg: str = "query"
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Декоратор для Ouroboros tool entry points — открывает top-level trace.
+
+    Применяется к sync tool handler'ам в `skills/*/plugin.py`, которые
+    Ouroboros вызывает через `register_tool(...)`. Один tool вызов = один
+    e2e trace в Langfuse, span'ы внутренних узлов LangGraph (через
+    `observe`) прицепятся к нему через contextvars.
+
+    Внутренний `asyncio.run(graph.ainvoke(...))` пропагирует contextvars
+    в новый event loop — узлы графа видят `_current_trace`.
+
+    Args:
+        name: имя trace в Langfuse UI (default — fn.__name__).
+        query_arg: имя kwarg, содержащего пользовательский query (для input
+            top-level observation). По умолчанию "query".
+
+    Поведение при exception:
+        Trace закрывается с answer=None и status=error (если узел графа
+        бросил), исключение re-raise — Ouroboros tool dispatcher ловит сам.
+    """
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        trace_name = name or fn.__name__
+
+        @functools.wraps(fn)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            query_value: Optional[str] = None
+            v = kwargs.get(query_arg)
+            if isinstance(v, str):
+                query_value = v
+            elif args and isinstance(args[0], str):
+                query_value = args[0]
+
+            trace = start_trace(query=query_value, name=trace_name)
+            token = _current_trace.set(trace)
+            try:
+                result = fn(*args, **kwargs)
+                # Tool возвращает JSON-string — это и есть ответ для trace.
+                end_trace(
+                    trace,
+                    answer=result if isinstance(result, str) else None,
+                )
+                return result
+            except BaseException:
+                end_trace(trace, answer=None)
+                raise
+            finally:
+                _current_trace.reset(token)
+
+        return wrapped
+
+    return decorator
+
+
 __all__ = [
     "observe",
+    "traced_tool",
     "log_llm_usage",
     "start_trace",
     "end_trace",

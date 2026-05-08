@@ -39,24 +39,37 @@ Feature-flag `LANGFUSE_ENABLED=false` отключает Langfuse SDK (lazy impo
 
 ```
 nefteboros/observability/
-  __init__.py     # observe декоратор, log_llm_usage, start_trace, end_trace
+  __init__.py     # observe + traced_tool декораторы, log_llm_usage,
+                  # start_trace / end_trace
   tracer.py       # JSONL writer + Langfuse SDK lazy init, contextvars stack
   cost.py         # COST_RATES для kimi-k2p6/GigaChat + fallback в ouroboros.pricing
 
 nefteboros/graphs/analyst_graph.py
   build_analyst_graph()        — wrap каждого узла в `observe(name=...)` при `add_node`.
-  invoke_with_trace(graph, s)  — entry-point обёртка: открывает top-level trace, run, закрывает.
+  invoke_with_trace(graph, s)  — обёртка для прямого вызова графа из CLI/eval.
+
+skills/neftegaz_analyst/plugin.py
+  @traced_tool(name="analyst_query") _tool_analyst_query
+  @traced_tool(name="rag_search")    _tool_rag_search
+  @traced_tool(name="web_search")    _tool_web_search
 ```
 
-Декораторы навешиваются **в builder'е**, файлы `nefteboros/graphs/nodes/*.py` остаются доменными. Единственное вмешательство в узлы — `log_llm_usage(usage)` в `synthesize._call_llm` после `chat_async` (3 строки), и аналогично в `llm_disambiguate` после `chat.ainvoke` (только когда fallback-путь, см. §«Known limitations»).
+Декораторы графа навешиваются **в builder'е** — файлы `nefteboros/graphs/nodes/*.py` остаются доменными. Tool entry points в `plugin.py` декорируются `@traced_tool` — это **e2e trace на каждый tool вызов** от Ouroboros agent loop'а до возврата JSON. Единственное вмешательство в узлы графа — `log_llm_usage(usage)` в `synthesize._call_llm` после `chat_async` (3 строки), и аналогично в `llm_disambiguate` после `chat.ainvoke` (только когда fallback-путь, см. §«Known limitations»).
 
-### Trace lifecycle
+### Trace lifecycle (e2e через tool entry point)
 
-1. Entry-point (CLI / ouroboros tool / eval) вызывает `invoke_with_trace(graph, state)`.
-2. `start_trace` → создаёт `Trace` + `langfuse.trace()` (если enabled), кладёт в `_current_trace` contextvar.
-3. `graph.ainvoke` → каждый узел через `observe`-wrap → `start_span` → fn → `end_span`.
-4. Узел внутри — `log_llm_usage(usage)` прикрепляет tokens/cost к текущему span'у через `_current_span` contextvar.
-5. `end_trace` → JSONL summary + Langfuse flush.
+Production-путь — Ouroboros agent loop вызывает наш tool, top-level trace рождается **там**:
+
+1. Ouroboros dispatcher вызывает `_tool_analyst_query(query="...")` (зарегистрирован через PluginAPI v1).
+2. `@traced_tool(name="analyst_query")` декоратор → `start_trace(query=..., name="analyst_query")` → создаёт `Trace` + Langfuse root observation, кладёт в `_current_trace` contextvar.
+3. Внутри tool: `asyncio.run(graph.ainvoke(state))` — `asyncio.run` пропагирует contextvars в новый event loop, узлы графа видят `_current_trace`.
+4. Каждый узел через `observe`-wrap → `start_span(trace_context={"trace_id": ...})` → child observation в Langfuse.
+5. Узел внутри — `log_llm_usage(usage)` прикрепляет tokens/cost к текущему span'у через `_current_span` contextvar.
+6. На return из tool — `end_trace` → answer = JSON-string, span_count = 4-5, total_cost_usd, total_latency_ms.
+
+`invoke_with_trace(graph, state)` — альтернативный entry для прямого вызова графа из CLI / eval scripts (не через tool dispatcher). Внутри делает то же самое.
+
+`rag_search` / `web_search` — плоские tools, e2e trace без child observations. При добавлении инструментации в Retriever / WebSearcher (потенциально в roadmap v2.2) — child spans прицепятся через тот же contextvars механизм.
 
 ### JSON-trace формат
 
