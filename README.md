@@ -13,8 +13,8 @@
 **Возможности:**
 - Отвечает на вопросы по нефтегазовой отрасли (Upstream/Midstream/Downstream, ОПЕК+, ценообразование Brent/WTI/Urals, санкции, спрос/предложение)
 - Гибридный поиск: RAG по отчётам OPEC/IEA/EIA + веб-поиск через Brave API с tier-фильтрацией и auto language detection (RU-запрос → RU-источники, EN → EN)
-- Прогноз цен Brent на 1/3/6/12 месяцев (ARIMA / SARIMAX, доверительные интервалы)
-- Логика приоритизации источников: RAG → web → forecast с явной маркировкой `[Отчёт OPEC MOMR, март 2026]` vs `[Источник: reuters.com, web]` vs `[Forecast: ARIMA, CI 80%]`
+- Прогноз цен Brent на 1/3/6/12 месяцев — SARIMAX + GBR ensemble, сценарный режим (bear/base/bull) под current shock 2026-05 (Iran/Hormuz), доверительные интервалы
+- Логика приоритизации источников: RAG → web → forecast с явной маркировкой `[Отчёт OPEC MOMR, март 2026]` vs `[Источник: reuters.com, web]` vs `[Forecast: ensemble, scenario=base, CI 80%]`
 - Anti-hallucination валидатор цитат для RAG (web — в backlog)
 
 **Интерфейсы:**

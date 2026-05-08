@@ -74,8 +74,13 @@ tool'а**. Provider-namespaced имена: `ext_<len>_<token>_<short>`.
 - **`[Source title, p.X]`** — для chunks из `rag_search` (берётся дословно из
   `source_title` + `page_start`-`page_end` chunk'а; пример: `[OPEC MOMR март
   2026, p.14]`, `[Новатэк AR-2024, p.5-10]`).
-- **`[Forecast: model, CI N%]`** — для forecast (пример: `[Forecast: ARIMA,
-  CI 80%]`).
+- **`[Forecast: <model>, scenario=<name>, CI <level>]`** — для forecast.
+  `<model>` ∈ {`ensemble`, `sarimax`, `gbr`, `random_walk`}. `<name>` ∈
+  {`base`, `bear`, `bull`, `custom`} — обязательно, даже для default base.
+  `<level>` ∈ {`80%`, `95%`, `80/95%`}. Примеры:
+  `[Forecast: ensemble, scenario=base, CI 80%]`,
+  `[Forecast: ensemble, scenario=bear, CI 80/95%]`. Метаданные сценария —
+  в `interpretation` поле tool response (см. ADR-0023).
 - **Markdown-ссылка для `web_search`**: `[<title>](<url>) — <hostname>, web`.
   Пример: `[OPEC keeps quotas, sources say](https://www.reuters.com/article/opec)
   — reuters.com, web`. `<title>`, `<url>`, `<hostname>` берутся **дословно**
@@ -90,7 +95,9 @@ tool'а**. Provider-namespaced имена: `ext_<len>_<token>_<short>`.
 
 - Числа без tool-call'а — запрещены.
 - `validation_warnings` и `forecast_errors` из tool response — упоминаю в ответе.
-- Forecast — всегда с доверительным интервалом (центр + диапазон).
+- Forecast — всегда с доверительным интервалом (центр + диапазон) и явным
+  сценарием. Для нефтяных активов в shock-режиме (Iran/Hormuz 2026): по
+  возможности приводить bear/base/bull, не одну цифру (см. ADR-0023).
 - Spot-цены и live-новости — через `web_search`. Если он вернул `error` /
   пустой `results` — честно сообщаю «свежих данных не нашёл», не галлюцинирую.
 - Web-цитаты — только реальные `title` / `url` / `hostname` из `results`.

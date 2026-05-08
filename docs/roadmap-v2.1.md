@@ -381,7 +381,7 @@ classify_intent (rule-based + LLM disambiguate)
 
 - Есть TL;DR (первый параграф ≤ 2 предложений).
 - ≥ 1 числовой факт.
-- ≥ 1 citation в принятом формате (`[Source title, p.X]` для RAG, `[<title>](<url>) — <hostname>, web` для web, `[Forecast: ensemble, CI 80/95%]` для forecast).
+- ≥ 1 citation в принятом формате (`[Source title, p.X]` для RAG, `[<title>](<url>) — <hostname>, web` для web, `[Forecast: <model>, scenario=<name>, CI <level>]` для forecast — финальный формат в ADR-0023).
 - Для price-related ответов — диапазон, не точка (см. D2).
 
 Метрика: % ответов в e2e, удовлетворяющих всем критериям.
