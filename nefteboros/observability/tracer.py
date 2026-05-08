@@ -139,7 +139,13 @@ class _Tracer:
     # --- init ---
 
     def _init_langfuse(self) -> None:
-        """Lazy import langfuse SDK. Любая ошибка — graceful, флаг false."""
+        """Lazy import langfuse SDK. Любая ошибка — graceful, флаг false.
+
+        Совместимо с langfuse SDK 4.x (current stable). API 4.x базируется на
+        OpenTelemetry: client.start_observation(...) / span.update(...) /
+        span.end() / client.flush(). Auth check на init — `auth_check()` —
+        чтобы при плохих ключах не пытаться отправлять данные на каждый span.
+        """
         flag = os.environ.get("LANGFUSE_ENABLED", "true").strip().lower()
         if flag in ("false", "0", "no", ""):
             return
@@ -153,10 +159,16 @@ class _Tracer:
             )
             return
 
-        host = os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com").strip()
+        # Стандарт SDK 4.x — `host`. Alias `LANGFUSE_BASE_URL` поддерживается
+        # как второе имя на случай если кто-то по аналогии с HYDRA_BASE_URL
+        # выставил BASE_URL.
+        host = (
+            os.environ.get("LANGFUSE_HOST", "").strip()
+            or os.environ.get("LANGFUSE_BASE_URL", "").strip()
+            or "https://cloud.langfuse.com"
+        )
 
         try:
-            # Lazy import — при отсутствии пакета JSON-trace продолжает работать.
             from langfuse import Langfuse
 
             self._langfuse_client = Langfuse(
@@ -164,6 +176,23 @@ class _Tracer:
                 secret_key=secret,
                 host=host,
             )
+            # Auth check — проверяем что ключи валидные, прежде чем разрешить.
+            try:
+                if not self._langfuse_client.auth_check():
+                    logger.warning(
+                        "Langfuse auth_check failed — invalid keys? "
+                        "JSON-trace продолжит работать."
+                    )
+                    self._langfuse_client = None
+                    return
+            except Exception as auth_exc:  # noqa: BLE001
+                # auth_check сам может бросить (network/RKN-блок).
+                logger.warning(
+                    "Langfuse auth_check error: %s. JSON-trace продолжит работать.",
+                    auth_exc,
+                )
+                self._langfuse_client = None
+                return
             self._langfuse_enabled = True
             logger.info("Langfuse initialized: host=%s", host)
         except ImportError:
@@ -252,28 +281,45 @@ class _Tracer:
     # --- public API ---
 
     def start_trace(self, query: Optional[str] = None) -> Trace:
-        """Открыть top-level trace. Не пишет в JSONL сразу — только при end_trace."""
+        """Открыть top-level trace. Не пишет в JSONL сразу — только при end_trace.
+
+        В Langfuse 4.x trace = root span/observation. Trace_id генерируется
+        SDK через `create_trace_id()`, и все вложенные observations связываются
+        через `trace_context={"trace_id": ...}`.
+        """
+        # Langfuse 4.x требует валидный OTel trace_id (16 bytes hex). Используем
+        # client.create_trace_id если SDK enabled, иначе обычный UUID.
+        if self._langfuse_enabled and self._langfuse_client is not None:
+            try:
+                lf_trace_id = self._langfuse_client.create_trace_id()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Langfuse create_trace_id failed: %s", exc)
+                lf_trace_id = str(uuid.uuid4())
+        else:
+            lf_trace_id = str(uuid.uuid4())
+
         trace = Trace(
-            trace_id=str(uuid.uuid4()),
+            trace_id=lf_trace_id,
             started_at=time.monotonic(),
             ts_iso=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             query=query,
         )
-        # Langfuse trace создаём сразу — нужно для span'ов.
+        # Открываем root observation в Langfuse, привязываем к нашему trace_id.
         if self._langfuse_enabled and self._langfuse_client is not None:
             try:
-                lf_trace = self._langfuse_client.trace(
-                    id=trace.trace_id,
+                root_obs = self._langfuse_client.start_observation(
+                    trace_context={"trace_id": lf_trace_id},
                     name="analyst_request",
+                    as_type="span",
                     input={"query": query},
                 )
-                self._langfuse_traces[trace.trace_id] = lf_trace
+                self._langfuse_traces[lf_trace_id] = root_obs
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Langfuse trace start failed: %s", exc)
+                logger.warning("Langfuse root observation start failed: %s", exc)
         return trace
 
     def end_trace(self, trace: Trace, answer: Optional[str] = None) -> None:
-        """Записать summary-строку (kind=trace) в JSONL + закрыть Langfuse trace."""
+        """Записать summary-строку (kind=trace) в JSONL + закрыть Langfuse root."""
         trace.answer = answer
         total_ms = int((time.monotonic() - trace.started_at) * 1000)
 
@@ -292,19 +338,23 @@ class _Tracer:
 
         self._write_jsonl(record)
 
-        # Langfuse — обновляем trace с output и flush.
+        # Langfuse — закрываем root observation + flush.
         if self._langfuse_enabled:
             try:
-                lf_trace = self._langfuse_traces.pop(trace.trace_id, None)
-                if lf_trace is not None:
-                    lf_trace.update(output={"answer": answer}, metadata={
-                        "total_latency_ms": total_ms,
-                        "total_cost_usd": record["total_cost_usd"],
-                        "span_count": trace.span_count,
-                        "status": trace.status,
-                    })
+                root_obs = self._langfuse_traces.pop(trace.trace_id, None)
+                if root_obs is not None:
+                    root_obs.update(
+                        output={"answer": answer},
+                        metadata={
+                            "total_latency_ms": total_ms,
+                            "total_cost_usd": record["total_cost_usd"],
+                            "span_count": trace.span_count,
+                            "status": trace.status,
+                        },
+                        level="ERROR" if trace.status == "error" else "DEFAULT",
+                    )
+                    root_obs.end()
                 if self._langfuse_client is not None:
-                    # Async flush — не блокирует.
                     self._langfuse_client.flush()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Langfuse trace end failed: %s", exc)
@@ -314,8 +364,15 @@ class _Tracer:
         node: str,
         trace: Trace,
         input_data: Optional[dict[str, Any]] = None,
+        as_type: str = "span",
     ) -> Span:
-        """Открыть span. Не пишет в JSONL — запись только при end_span."""
+        """Открыть span. Не пишет в JSONL — запись только при end_span.
+
+        as_type:
+            "span"       — обычный узел (rule-based, validation, retrieval).
+            "generation" — LLM-вызов; в Langfuse UI отрисовывается как chat
+                           message с input/output, model, tokens, cost.
+        """
         span = Span(
             trace_id=trace.trace_id,
             span_id=self.next_span_id(),
@@ -324,14 +381,16 @@ class _Tracer:
             ts_iso=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             input=self._truncate(input_data) if input_data else None,
         )
-        # Langfuse span (named "observation" в API).
-        if self._langfuse_enabled:
+        if self._langfuse_enabled and self._langfuse_client is not None:
             try:
-                lf_trace = self._langfuse_traces.get(trace.trace_id)
-                if lf_trace is not None:
-                    lf_span = lf_trace.span(name=node, input=input_data)
-                    # Сохраняем хэндл на span внутри dataclass через side-channel.
-                    setattr(span, "_lf_span", lf_span)
+                lf_span = self._langfuse_client.start_observation(
+                    trace_context={"trace_id": trace.trace_id},
+                    name=node,
+                    as_type=as_type,
+                    input=input_data,
+                )
+                setattr(span, "_lf_span", lf_span)
+                setattr(span, "_lf_as_type", as_type)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Langfuse span start failed for node=%s: %s", node, exc)
         return span
@@ -395,28 +454,52 @@ class _Tracer:
 
         self._write_jsonl(record)
 
-        # Langfuse end — закрыть observation.
+        # Langfuse end — закрыть observation. 4.x API: update() для метаданных,
+        # потом end(). Для as_type="generation" доступны usage_details +
+        # cost_details — отдельные структуры, не metadata.
         lf_span = getattr(span, "_lf_span", None)
+        lf_as_type = getattr(span, "_lf_as_type", "span")
         if lf_span is not None:
             try:
                 metadata = {
                     "latency_ms": latency_ms,
                     "status": status,
                 }
-                if span.model:
-                    metadata["model"] = span.model
-                if span.prompt_tokens is not None:
-                    metadata["prompt_tokens"] = span.prompt_tokens
-                if span.completion_tokens is not None:
-                    metadata["completion_tokens"] = span.completion_tokens
-                if span.cost_usd is not None:
-                    metadata["cost_usd"] = span.cost_usd
-                lf_span.end(
-                    output=output_data,
-                    level="ERROR" if status == "error" else "DEFAULT",
-                    status_message=span.error["message"] if span.error else None,
-                    metadata=metadata,
-                )
+                update_kwargs: dict[str, Any] = {
+                    "metadata": metadata,
+                    "level": "ERROR" if status == "error" else "DEFAULT",
+                }
+                if output_data is not None:
+                    update_kwargs["output"] = output_data
+                if span.error is not None:
+                    update_kwargs["status_message"] = span.error["message"]
+
+                if lf_as_type == "generation":
+                    # LLM-узел: model + tokens + cost через нативные поля.
+                    if span.model:
+                        update_kwargs["model"] = span.model
+                    usage_details: dict[str, int] = {}
+                    if span.prompt_tokens is not None:
+                        usage_details["input"] = int(span.prompt_tokens)
+                    if span.completion_tokens is not None:
+                        usage_details["output"] = int(span.completion_tokens)
+                    if usage_details:
+                        update_kwargs["usage_details"] = usage_details
+                    if span.cost_usd is not None:
+                        update_kwargs["cost_details"] = {"total": float(span.cost_usd)}
+                else:
+                    # Обычный span — пишем в metadata, чтобы видеть в UI.
+                    if span.model:
+                        metadata["model"] = span.model
+                    if span.prompt_tokens is not None:
+                        metadata["prompt_tokens"] = span.prompt_tokens
+                    if span.completion_tokens is not None:
+                        metadata["completion_tokens"] = span.completion_tokens
+                    if span.cost_usd is not None:
+                        metadata["cost_usd"] = span.cost_usd
+
+                lf_span.update(**update_kwargs)
+                lf_span.end()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Langfuse span end failed for node=%s: %s", span.node, exc)
 

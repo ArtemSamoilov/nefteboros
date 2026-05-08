@@ -47,7 +47,8 @@ matplotlib>=3.9.0                 # для plots в forecast eval
 
 # --- Observability (см. ADR-0024) ---
 # Langfuse — серверные трейсы LangGraph узлов, cost/latency dashboard.
+# 4.x API на OpenTelemetry: client.start_observation / span.update / span.end.
 # Опциональная зависимость: при LANGFUSE_ENABLED=false (демо/CI) импорт
 # происходит lazy, отсутствие пакета ломает только Cloud-путь, JSON-trace
 # (metrics/runs/<ts>/trace.jsonl) работает независимо.
-langfuse>=2.0.0
+langfuse>=4.0.0

@@ -112,11 +112,24 @@ def build_analyst_graph() -> Any:
     # Wrap делается здесь, в builder'е, чтобы файлы `nodes/*.py` оставались
     # без декораторов (separation of concerns: nodes — domain логика,
     # graph — wiring + observability).
-    builder.add_node("classify_intent", observe(name="classify_intent")(_classify_node))
-    builder.add_node("llm_disambiguate", observe(name="llm_disambiguate")(llm_disambiguate))
+    #
+    # `as_type="generation"` для LLM-узлов (synthesize, llm_disambiguate) —
+    # тогда в Langfuse UI узел рисуется как chat-message с tokens / cost /
+    # model. Остальные — обычный span.
+    builder.add_node(
+        "classify_intent", observe(name="classify_intent")(_classify_node)
+    )
+    builder.add_node(
+        "llm_disambiguate",
+        observe(name="llm_disambiguate", as_type="generation")(llm_disambiguate),
+    )
     builder.add_node("forecast_call", observe(name="forecast_call")(forecast_call))
-    builder.add_node("synthesize", observe(name="synthesize")(synthesize))
-    builder.add_node("validate_citations", observe(name="validate_citations")(validate_citations))
+    builder.add_node(
+        "synthesize", observe(name="synthesize", as_type="generation")(synthesize)
+    )
+    builder.add_node(
+        "validate_citations", observe(name="validate_citations")(validate_citations)
+    )
 
     builder.set_entry_point("classify_intent")
     builder.add_conditional_edges(

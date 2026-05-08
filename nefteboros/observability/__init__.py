@@ -47,7 +47,9 @@ logger = logging.getLogger(__name__)
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
 
-def observe(*, name: Optional[str] = None) -> Callable[[F], F]:
+def observe(
+    *, name: Optional[str] = None, as_type: str = "span"
+) -> Callable[[F], F]:
     """Декоратор / wrapper для async-узлов LangGraph.
 
     Применяется через wrap при `add_node` в `analyst_graph.py`, чтобы файлы
@@ -55,15 +57,18 @@ def observe(*, name: Optional[str] = None) -> Callable[[F], F]:
     лежат декораторы»).
 
     Поведение:
-    - Перед вызовом — start_span(node=name).
+    - Перед вызовом — start_span(node=name, as_type=as_type).
     - Контекст span'а доступен через `_current_span.get()` для `log_llm_usage`.
     - После вызова — end_span(status="ok"|"error", output, error).
     - Узел не падает — exception ре-райзится наружу (LangGraph сам обработает).
     - Если top-level trace не открыт (graph вызван без `start_trace`) —
-      span создастся, но привязки к trace не будет; warning в logger.
+      пишется orphan-span (только в JSON-trace, без Langfuse-привязки).
 
     Args:
         name: имя узла в трейсе. Если None — берётся `fn.__name__`.
+        as_type: "span" (default) для не-LLM узлов; "generation" для LLM-узлов
+                 (synthesize, llm_disambiguate) — тогда в Langfuse UI узел
+                 рисуется как chat-message с tokens / cost / model.
     """
 
     def decorator(fn: F) -> F:
@@ -115,7 +120,9 @@ def observe(*, name: Optional[str] = None) -> Callable[[F], F]:
                 elif isinstance(first, dict):
                     input_data = {"state_keys": list(first.keys())}
 
-            span = tracer.start_span(node_name, trace=trace, input_data=input_data)
+            span = tracer.start_span(
+                node_name, trace=trace, input_data=input_data, as_type=as_type
+            )
             span_token = _current_span.set(span)
 
             try:
