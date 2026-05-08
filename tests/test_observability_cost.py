@@ -90,15 +90,12 @@ class TestComputeCost:
         c2 = compute_cost("GigaChat-2-Max", 1000, 500)
         assert c1 == c2
 
-    def test_gigachat_2_pro(self):
-        """GigaChat 2 Pro: 500 ₽/1M @ курс 92 ₽/$ ≈ 5.435 $/1M."""
-        cost = compute_cost("GigaChat-2-Pro", 1000, 500)
-        assert cost == pytest.approx(1500 * 500.0 / 92.0 / 1_000_000.0, rel=1e-3)
-
-    def test_gigachat_2_lite(self):
-        """GigaChat 2 Lite: 65 ₽/1M @ курс 92 ₽/$ ≈ 0.706 $/1M."""
-        cost = compute_cost("GigaChat-2-Lite", 1000, 500)
-        assert cost == pytest.approx(1500 * 65.0 / 92.0 / 1_000_000.0, rel=1e-3)
+    def test_gigachat_lite_pro_returns_none(self):
+        """Lite и Pro сознательно не в COST_RATES (см. cost.py): в стеке
+        только Max. Если кто-то указал Lite/Pro в env — `cost=null` с
+        debug-warning, а не молчаливый cost для не-нашей модели."""
+        assert compute_cost("GigaChat-2-Lite", 1000, 500) is None
+        assert compute_cost("GigaChat-2-Pro", 1000, 500) is None
 
     def test_gigachat_input_equals_output(self):
         """Свойство Сбера: input и output по одинаковой цене."""

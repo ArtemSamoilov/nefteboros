@@ -56,15 +56,17 @@ COST_RATES: dict[str, tuple[float, float, float]] = {
     "deepseek-v3p1": (0.27, 0.07, 1.10),
     "minimax-m2p7": (0.35, 0.35, 1.40),
     "gpt-oss-120b": (0.20, 0.20, 0.80),
-    # --- GigaChat 2 (Sber) B2B-тарифы 2026-05 ---
-    # 2 Lite: 65 ₽/1M = 0.706 $/1M
-    "GigaChat-2-Lite": (65.0 / _RUB_USD_RATE,) * 3,
-    # 2 Pro: 500 ₽/1M = 5.435 $/1M
-    "GigaChat-2-Pro": (500.0 / _RUB_USD_RATE,) * 3,
-    # 2 Max: 650 ₽/1M = 7.065 $/1M
-    # ROUTING_LLM_MODEL по умолчанию (см. .env.example) и `_DEFAULT_MODEL`
-    # в llm_disambiguate. Алиас "GigaChat-Max" — на случай если provider SDK
-    # резолвит без префикса "2".
+    # --- GigaChat 2 Max (Sber) B2B-тариф 2026-05 ---
+    # Только Max — единственная модель GigaChat в стеке (см. .env.example
+    # ROUTING_LLM_MODEL и `_DEFAULT_MODEL` в llm_disambiguate). Lite / Pro
+    # сознательно не заведены: если кто-то случайно укажет их в env, лучше
+    # пусть будет `cost=null` с debug-warning, чем тихий cost для модели,
+    # которой не должно быть в нашем стеке.
+    #
+    # 9 750 ₽ / 15M tokens = 650 ₽/1M ≈ $7.065/1M.
+    # Сбер: input == output, кеш-скидки нет.
+    # Алиас "GigaChat-Max" — на случай если provider SDK резолвит имя без
+    # префикса "2" (наследие от первого поколения в названиях env-vars).
     "GigaChat-2-Max": (650.0 / _RUB_USD_RATE,) * 3,
     "GigaChat-Max": (650.0 / _RUB_USD_RATE,) * 3,
 }
