@@ -120,21 +120,19 @@ Date,Open,High,Low,Close,Adj Close,Volume
 - `must_cite_sources` — opt'ональные substring'и в `source_title`, которые должны быть процитированы. В e2e не задействовано (overhead semantic сверки), задел для `eval_citations.py`.
 - `rubric` — текстовые критерии для optional LLM-as-judge. На deterministic baseline не используется (substring + structural только).
 
-**Состав корпуса (50 диалогов, baseline для нахождения проблемных кейсов):**
+**Состав корпуса (100 диалогов):**
 
 | Категория | Кол-во | Held-out | Примечание |
 |---|---:|---:|---|
-| `rag_only` | 8 | 1 | Разные источники из manifest (OPEC, Bruegel, Энергостратегия, Новатэк, IEA, Газпром) |
-| `web_only` | 5 | 1 | Spot-цены, свежие новости, RU + EN |
-| `rag_plus_web` | 1 | 0 | Канон ТЗ §4.6 |
-| `forecast` | 8 | 1 | Brent/WTI/Urals/ESPO/HH/TTF, разные горизонты, +1 рефьюз на 24m |
-| `out_of_scope` | 7 | 1 | Погода, крипта, FX, юрист, оценки лиц, инвест-рекомендация, тривиальный |
-| `multi_tool` | 8 | 1 | RAG+forecast, forecast+web, RAG+web, тройные комбо |
-| `follow_up` | 4 | 1 | Двухтурные с переиспользованием контекста |
-| `unknown_with_hypothesis` | 4 | 1 | Запрет на «нет данных» — структурная гипотеза |
-| `adversarial` | 5 | 2 | «Без CI», prompt injection, торговый сигнал, social engineering, «скажи нет данных» |
-| **Всего** | **50** | **9** | dev: 41, held-out: 9 (~18%) |
+| `rag_only` | 16 | 2 | Полный manifest: OPEC MOMR/AR/WOO/ASB, Bruegel, Энергостратегия, Новатэк, Газпром, Лукойл, Татнефть, Роснефть, IEA Oil/Gas, EIA STEO, IEF, ИНЭИ, REPowerEU |
+| `web_only` | 10 | 2 | Spot Brent/Urals/ESPO/HH/TTF, свежие санкции, заявления Минэнерго, Китай-импорт, RU/EN |
+| `rag_plus_web` | 2 | 0 | Канон ТЗ §4.6 + WOO vs current OPEC+ |
+| `forecast` | 16 | 2 | Brent/WTI/Urals/ESPO/HH/TTF/urals_minfin_blend, горизонты 1m–12m + рефьюз на 24m, RU+EN |
+| `out_of_scope` | 14 | 2 | Погода, крипта (×2), FX (×2), юрист, оценки лиц, инвест-рек (×2), металлы, consumer, космос, тривиальный |
+| `multi_tool` | 16 | 2 | RAG+forecast, forecast+web, RAG+web, тройные, Иран-сценарий, Газпром-Китай, LNG global, Urals discount, RF добыча, AR vs MOMR |
+| `follow_up` | 8 | 2 | Двухтурные + 3-turn (драйвер→корректировка), cross-language (en→ru), method override |
+| `unknown_with_hypothesis` | 8 | 2 | Запрет на «нет данных» — Иран, ЕС-Газпром, Hormuz, Татнефть, ОПЕК-распад, НДПИ, Brent $40, Газпром-банкротство |
+| `adversarial` | 10 | 4 | «Без CI», prompt injection (×2), торговый сигнал, social eng. (×2), «нет данных», role-bend (ChatGPT/анекдоты), JSON без citations, «без истории» |
+| **Всего** | **100** | **18** | dev: 82, held-out: 18 (18%) |
 
 Канон ТЗ §4.6 — диалоги 1-5 (по одной строке на категорию).
-
-При расширении до 100+ — балансировать: усилить adversarial (защита от prompt injection из C1/C2) и conflict cases (RAG vs web расхождения).
