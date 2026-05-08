@@ -151,13 +151,18 @@ async def llm_disambiguate(state: GraphState) -> dict[str, Any]:
         {"role": "user", "content": prompt},
     ]
 
+    raw_response: Any = None  # для логирования tokens (usage_metadata) после успеха
     try:
         result: Any
         try:
             structured = chat.with_structured_output(_LLMIntent)
             result = await structured.ainvoke(messages)
+            # `with_structured_output` обычно возвращает уже распарсенный
+            # объект и теряет usage_metadata. Это known limitation — для
+            # этого узла cost будет null, см. ADR-0024 §«Known limitations».
         except (NotImplementedError, AttributeError):
             response = await chat.ainvoke(messages)
+            raw_response = response  # содержит usage_metadata
             raw = getattr(response, "content", None) or str(response)
             data = json.loads(str(raw).strip())
             result = _LLMIntent(**data)
@@ -167,6 +172,22 @@ async def llm_disambiguate(state: GraphState) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — graph node must not crash
         logger.exception("llm_disambiguate failed")
         return _fallback(state, reason=f"llm_error_{type(exc).__name__}")
+
+    # Observability: если LangChain сохранил usage_metadata в ответе (fallback
+    # путь), прикрепляем к span'у. На fast-path (with_structured_output)
+    # usage_metadata теряется — span получит cost_usd=null. См. ADR-0024.
+    try:
+        from nefteboros.observability import log_llm_usage
+
+        usage_meta = getattr(raw_response, "usage_metadata", None) if raw_response else None
+        if usage_meta:
+            log_llm_usage(
+                dict(usage_meta) if not isinstance(usage_meta, dict) else usage_meta,
+                model=_DEFAULT_MODEL,
+                provider="gigachat",
+            )
+    except Exception as obs_exc:  # noqa: BLE001 — observability never breaks node
+        logger.debug("log_llm_usage failed in llm_disambiguate: %s", obs_exc)
 
     if not isinstance(result, _LLMIntent):
         logger.warning("Unexpected LLM result shape: %r", type(result).__name__)

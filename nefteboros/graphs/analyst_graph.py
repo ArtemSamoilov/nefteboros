@@ -1,6 +1,7 @@
 """Analyst LangGraph subgraph — wiring узлов в StateGraph.
 
-См. ADR-0014 (minimal-graph baseline) + ADR-0015 (hybrid LLM disambiguate).
+См. ADR-0014 (minimal-graph baseline) + ADR-0015 (hybrid LLM disambiguate)
++ ADR-0024 (observability — `@observe` через wrap при `add_node`).
 
 Граф:
     classify_intent (rule-based)
@@ -17,6 +18,9 @@ Build-функция возвращает скомпилированный State
 
     graph = build_analyst_graph()
     final = await graph.ainvoke(GraphState(query="прогноз brent на 3 месяца"))
+
+Каждый узел оборачивается `@observe` при регистрации в builder — span
+открывается на входе, закрывается на выходе. См. `nefteboros/observability/`.
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ from nefteboros.graphs.nodes import (
     validate_citations,
 )
 from nefteboros.graphs.state import GraphState, IntentType
+from nefteboros.observability import end_trace, observe, start_trace
+from nefteboros.observability.tracer import _current_trace
 
 
 # =============================================================================
@@ -102,11 +108,15 @@ def build_analyst_graph() -> Any:
     """
     builder: StateGraph = StateGraph(GraphState)
 
-    builder.add_node("classify_intent", _classify_node)
-    builder.add_node("llm_disambiguate", llm_disambiguate)
-    builder.add_node("forecast_call", forecast_call)
-    builder.add_node("synthesize", synthesize)
-    builder.add_node("validate_citations", validate_citations)
+    # Каждый узел оборачивается `observe(name=...)` для трейсинга. См. ADR-0024.
+    # Wrap делается здесь, в builder'е, чтобы файлы `nodes/*.py` оставались
+    # без декораторов (separation of concerns: nodes — domain логика,
+    # graph — wiring + observability).
+    builder.add_node("classify_intent", observe(name="classify_intent")(_classify_node))
+    builder.add_node("llm_disambiguate", observe(name="llm_disambiguate")(llm_disambiguate))
+    builder.add_node("forecast_call", observe(name="forecast_call")(forecast_call))
+    builder.add_node("synthesize", observe(name="synthesize")(synthesize))
+    builder.add_node("validate_citations", observe(name="validate_citations")(validate_citations))
 
     builder.set_entry_point("classify_intent")
     builder.add_conditional_edges(
@@ -133,4 +143,31 @@ def build_analyst_graph() -> Any:
     return builder.compile()
 
 
-__all__ = ["build_analyst_graph"]
+async def invoke_with_trace(graph: Any, state: GraphState) -> dict[str, Any]:
+    """Open a top-level observability trace, run graph.ainvoke, close trace.
+
+    Entry-points (CLI, ouroboros tool entry `ext_18_r_neftegaz_analyst_*`,
+    telegram bot, eval скрипты) должны использовать эту обёртку вместо
+    прямого `graph.ainvoke(state)` — иначе span'ы узлов будут orphan
+    (см. ADR-0024 §«Trace lifecycle»).
+
+    Возврат — обычный LangGraph result (dict). Исключения пробрасываются,
+    но trace всё равно закрывается через try/finally.
+    """
+    trace = start_trace(query=getattr(state, "query", None))
+    token = _current_trace.set(trace)
+    try:
+        result = await graph.ainvoke(state)
+        # synthesis — финальный текст ответа в GraphState; если узел упал
+        # до synthesize, поле останется None — это нормально.
+        answer = result.get("synthesis") if isinstance(result, dict) else None
+        end_trace(trace, answer=answer)
+        return result
+    except BaseException:
+        end_trace(trace, answer=None)
+        raise
+    finally:
+        _current_trace.reset(token)
+
+
+__all__ = ["build_analyst_graph", "invoke_with_trace"]
