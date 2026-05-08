@@ -67,7 +67,10 @@ CURRENT_STATE_2026_05: dict[str, str] = {
 # Типы драйверов и сценариев
 # =============================================================================
 
-DriverHormuz = Literal["blocked", "partial_reopen", "full_reopen", "full_closure"]
+DriverHormuz = Literal[
+    "blocked", "partial_reopen", "full_reopen",
+    "partial_closure", "full_closure",
+]
 DriverIran = Literal[
     "maximum_pressure_active", "partial_lift", "full_lift", "further_tightening"
 ]
@@ -92,7 +95,13 @@ _HORMUZ_SHIFT: dict[DriverHormuz, tuple[float, float, float]] = {
     "blocked": (0.0, 0.0, 0.0),               # current state, anchor reference
     "partial_reopen": (-22.0, -18.0, -15.0),  # source: Goldman post-ceasefire $90 vs $99 = -$9..-$15 partial
     "full_reopen": (-45.0, -37.0, -30.0),     # source: full normalization, отыгрывает весь shock-premium
-    "full_closure": (50.0, 62.0, 75.0),       # source: Bloomberg Hormuz closure model; Goldman severe extrapolated
+    # partial_closure: moderate escalation от current blocked — secondary sanctions
+    # на shadow fleet усилены, дополнительный 1-1.5 mbpd off market.
+    # Match: Goldman severe Q4 2026 = $115 при 2 mbpd persistent loss → +$25 mid от base.
+    "partial_closure": (15.0, 22.0, 30.0),
+    # full_closure: tail-risk extreme. Доступен через custom ScenarioParams,
+    # НЕ в bull preset (preset должен быть expected escalation, не worst case).
+    "full_closure": (50.0, 62.0, 75.0),
 }
 
 # Iran экспорт: current = 0.4 mbpd vs pre-war 1.6 mbpd = -1.2 mbpd off market
@@ -178,16 +187,18 @@ PRESET_SCENARIOS: dict[ScenarioName, ScenarioParams] = {
         # Соответствует: Goldman post-ceasefire $90, JPM $60 (нижняя граница)
     ),
     "bull": ScenarioParams(
-        # Escalation: MOU breaks, Hormuz fully closed, regional war expands
-        hormuz="full_closure",          # +$50..+$75
+        # Escalation moderate: MOU не подписан, secondary sanctions на shadow
+        # fleet усилены, +1-1.5 mbpd dropped off market. НЕ full Hormuz closure
+        # (full_closure — tail-risk, доступен через custom ScenarioParams).
+        hormuz="partial_closure",       # +$15..+$30 (match Goldman severe)
         iran="further_tightening",      # +$2..+$3
         opec_plus="gradual_unwinding",
         russia_cap="tightened_dynamic", # +$3..+$5
-        china="weak",                   # -$3..-$5 (recession risk)
+        china="weak",                   # -$3..-$5 (price-induced demand softening)
         is_preset=True,
-        # Net delta: +$45..+$75 → если base ~$100 → bull ~$145-175
-        # Bull агрессивнее Goldman severe ($115 при 2 mbpd loss) — отражает
-        # full closure (>2 mbpd persistent), не просто 2 mbpd loss
+        # Net delta: ~+$17..+$33 mid от base → если base ~$100 → bull ~$117-133
+        # Match: Goldman severe Q4 2026 = $115 при 2 mbpd persistent loss.
+        # Tail-risk full_closure (+$50..+$75) доступен через custom params.
     ),
 }
 
@@ -249,9 +260,46 @@ class ScenarioDelta:
     driver_breakdown: dict[str, tuple[float, float, float]]
 
 
+# Horizon scaling factor — отражает вероятность полной реализации сценария за
+# данный horizon. На 1m вероятность full realization (Hormuz partial closure +
+# Iran tightening + ...) низкая → масштабируем delta. На 12m — высокая prob
+# того что что-то из preset реализуется.
+# Калибровка прагматичная (не probabilistic per driver): cap'нуть extremes на
+# коротких горизонтах. См. ADR-0023 §Q1 v3 «horizon scaling».
+_HORIZON_DELTA_SCALING: dict[int, float] = {
+    1: 0.30,
+    3: 0.50,
+    6: 0.75,
+    12: 1.00,
+}
+
+
+def get_horizon_delta_scaling(horizon_months: int) -> float:
+    """Множитель на scenario delta per horizon (см. ADR-0023 §Q1 v3).
+
+    Линейная интерполяция между точками; вне таблицы — clamp к [0.30, 1.00].
+    """
+    if horizon_months <= 1:
+        return _HORIZON_DELTA_SCALING[1]
+    if horizon_months >= 12:
+        return _HORIZON_DELTA_SCALING[12]
+    if horizon_months in _HORIZON_DELTA_SCALING:
+        return _HORIZON_DELTA_SCALING[horizon_months]
+    # Линейная интерполяция между ближайшими точками
+    keys = sorted(_HORIZON_DELTA_SCALING.keys())
+    for i in range(len(keys) - 1):
+        a, b = keys[i], keys[i + 1]
+        if a <= horizon_months <= b:
+            fa, fb = _HORIZON_DELTA_SCALING[a], _HORIZON_DELTA_SCALING[b]
+            t = (horizon_months - a) / (b - a)
+            return fa + t * (fb - fa)
+    return 1.0
+
+
 def compute_scenario_delta(
     params: ScenarioParams,
     asset_id: str,
+    horizon_months: Optional[int] = None,
 ) -> ScenarioDelta:
     """Посчитать итоговый shift сценария относительно base scenario.
 
@@ -259,13 +307,16 @@ def compute_scenario_delta(
     1. Для base scenario — все driver shifts = 0 (по построению PRESET_SCENARIOS["base"]).
     2. Для bear/bull/custom — суммируем shifts от каждого driver per state.
     3. Для WTI — Hormuz shift умножен на _HORMUZ_REDUCED_FACTOR_WTI.
+    4. Если horizon_months передан — применяется horizon scaling factor
+       (отражает вероятность полной реализации сценария).
 
     Args:
         params: ScenarioParams с driver states.
         asset_id: для применения asset-specific корректировок (WTI Hormuz).
+        horizon_months: 1/3/6/12. Если None — без horizon scaling (legacy mode).
 
     Returns:
-        ScenarioDelta с (low, mid, high) и breakdown.
+        ScenarioDelta с (low, mid, high) и breakdown (per-driver, без scaling).
 
     Raises:
         ValueError: если asset_id не applicable (используй is_scenario_applicable).
@@ -290,10 +341,17 @@ def compute_scenario_delta(
     breakdown["russia_cap"] = _RUSSIA_CAP_SHIFT[params.russia_cap]
     breakdown["china"] = _CHINA_SHIFT[params.china]
 
-    # Линейная суммация
+    # Линейная суммация (raw, без horizon scaling)
     total_low = sum(t[0] for t in breakdown.values())
     total_mid = sum(t[1] for t in breakdown.values())
     total_high = sum(t[2] for t in breakdown.values())
+
+    # Horizon scaling — вероятность полной реализации
+    if horizon_months is not None:
+        scaling = get_horizon_delta_scaling(horizon_months)
+        total_low *= scaling
+        total_mid *= scaling
+        total_high *= scaling
 
     return ScenarioDelta(
         low=total_low,
@@ -323,31 +381,100 @@ class BaseAnchor:
     anchor_shift: float           # = observed_spot - raw_model_value
 
 
+# Anchor decay по horizon — отражает вероятность того, что current shock state
+# сохранится. На 1m: ~100% probability (один месяц короткий). На 12m: ~15%
+# probability (resolution или дальнейшая эскалация почти неизбежны).
+# Это не «model belief» a priori, а probability-weighted contribution current
+# shock к target_date forecast. См. ADR-0023 §Q1 v3 «anchor decay».
+_HORIZON_ANCHOR_DECAY: dict[int, float] = {
+    1: 1.00,
+    3: 0.70,
+    6: 0.40,
+    12: 0.15,
+}
+
+
+def get_anchor_decay(
+    horizon_months: int,
+    scenario_name: Optional[str] = None,
+) -> float:
+    """Множитель anchor по horizon, scenario-aware.
+
+    Логика scenario-aware decay (ADR-0023 §Q1 v3):
+      - **base**: shock сохраняется → decay по таблице (1m × 1.0, 12m × 0.15).
+        На длинных horizons модель «возвращается к mean reversion».
+      - **bear**: de-escalation → shock выветривается БЫСТРЕЕ. Decay agressive:
+        × 0.5 от base decay. На 1m × 0.5, на 12m × 0.075.
+      - **bull**: escalation → current shock сохраняется + усиливается.
+        Anchor НЕ decays: × 1.0 на всех horizons.
+      - **custom**: применяется base decay (default).
+
+    Args:
+        horizon_months: 1/3/6/12.
+        scenario_name: 'base'/'bear'/'bull'/None (= 'base').
+
+    Returns:
+        Множитель в [0.0, 1.0].
+    """
+    # Base decay по таблице
+    if horizon_months <= 1:
+        base_decay = _HORIZON_ANCHOR_DECAY[1]
+    elif horizon_months >= 12:
+        base_decay = _HORIZON_ANCHOR_DECAY[12]
+    elif horizon_months in _HORIZON_ANCHOR_DECAY:
+        base_decay = _HORIZON_ANCHOR_DECAY[horizon_months]
+    else:
+        keys = sorted(_HORIZON_ANCHOR_DECAY.keys())
+        base_decay = 1.0
+        for i in range(len(keys) - 1):
+            a, b = keys[i], keys[i + 1]
+            if a <= horizon_months <= b:
+                fa, fb = _HORIZON_ANCHOR_DECAY[a], _HORIZON_ANCHOR_DECAY[b]
+                t = (horizon_months - a) / (b - a)
+                base_decay = fa + t * (fb - fa)
+                break
+
+    # Scenario-aware modulation
+    if scenario_name == "bull":
+        return 1.0  # Escalation — current shock сохраняется
+    if scenario_name == "bear":
+        return base_decay * 0.5  # De-escalation — shock выветривается быстрее
+    return base_decay  # base / custom / None
+
+
 def compute_base_anchor(
     raw_model_value: float,
     observed_spot: float,
+    horizon_months: Optional[int] = None,
+    scenario_name: Optional[str] = None,
 ) -> BaseAnchor:
-    """Посчитать anchor shift для base scenario.
+    """Посчитать anchor shift для scenario с horizon-aware и scenario-aware decay.
 
-    На горизонтах >1m модель уходит от spot из-за mean-reversion / drift; для
-    base scenario мы хотим, чтобы значение **на target_date** отражало текущий
-    shock-режим (если он сохранится). Anchor — это (observed_spot - raw_model)
-    добавленный к raw_model_value, чтобы start был = observed_spot.
-
-    NB: shift применяется только к value/CI на target_date, не к траектории.
-    История модели не модифицируется.
+    Anchor = (observed_spot - raw_model_value) — это «shock premium», который
+    модель не схватила. Decay зависит от horizon И scenario:
+      - base: decay по таблице (1m × 1.0, 12m × 0.15)
+      - bear: × 0.5 от base decay (shock выветривается быстрее)
+      - bull: × 1.0 на всех horizons (escalation сохраняет shock)
 
     Args:
-        raw_model_value: model mean output без shift.
+        raw_model_value: model mean output без shift на target_date.
         observed_spot: последняя наблюдаемая цена (history.iloc[-1]).
+        horizon_months: 1/3/6/12. Если None — без decay (legacy).
+        scenario_name: 'base'/'bear'/'bull'/None.
 
     Returns:
-        BaseAnchor с прозрачным shift'ом.
+        BaseAnchor с anchor_shift = (spot - raw) × decay(horizon, scenario).
     """
+    raw_shift = observed_spot - raw_model_value
+    if horizon_months is not None:
+        decay = get_anchor_decay(horizon_months, scenario_name=scenario_name)
+        anchor_shift = raw_shift * decay
+    else:
+        anchor_shift = raw_shift
     return BaseAnchor(
         raw_model_value=raw_model_value,
         observed_spot=observed_spot,
-        anchor_shift=observed_spot - raw_model_value,
+        anchor_shift=anchor_shift,
     )
 
 
@@ -413,6 +540,8 @@ __all__ = [
     "REVIEW_AFTER_DAYS",
     "FORECAST_RANDOM_STATE",
     "CURRENT_STATE_2026_05",
+    "get_horizon_delta_scaling",
+    "get_anchor_decay",
     "DriverHormuz",
     "DriverIran",
     "DriverOpecPlus",

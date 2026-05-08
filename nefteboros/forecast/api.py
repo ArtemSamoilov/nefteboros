@@ -221,21 +221,56 @@ def _forecast_observable(
     if use_log:
         raw_points = [_exp_point(p) for p in raw_points]
 
-    # Apply scenario shift: base anchor (observation-anchored) + scenario delta.
-    # См. ADR-0023 §Q1. Для assets вне scenario applicability — shift = 0,
-    # warning формируется в interpretation.
+    # Apply scenario shift: base anchor (horizon-decayed) + scenario delta
+    # (horizon-scaled). См. ADR-0023 §Q1 v3. Для assets вне scenario
+    # applicability — shift = 0, warning в interpretation.
     observed_spot = float(history.iloc[-1])
     raw_target_value = raw_points[-1].value
     anchor = compute_base_anchor(
         raw_model_value=raw_target_value,
         observed_spot=observed_spot,
+        horizon_months=horizon.months,
+        scenario_name=scenario_label(scenario_params),
     )
+
+    # Refusal: 12m base в shock-режиме (см. ADR-0023 §Q1 v3 «refusal на 12m»).
+    # Persistent shock 12 месяцев — historically unlikely (Hormuz 2026, war 2022,
+    # COVID 2020 — все < 12 месяцев). Точечная оценка бесполезна.
+    raw_shift = anchor.observed_spot - anchor.raw_model_value
+    shock_ratio = abs(raw_shift) / max(abs(anchor.observed_spot), 1.0)
+    if (
+        is_scenario_applicable(asset)
+        and horizon.months == 12
+        and scenario_params == parse_scenario("base")
+        and shock_ratio > 0.15
+    ):
+        return ForecastRefusal(
+            asset=asset,
+            requested_horizon_months=12,
+            reason=(
+                f"Точечный прогноз {asset!r} на 12m в base scenario неустойчив: "
+                f"market в shock-режиме (anchor shift {raw_shift:+.1f} = "
+                f"{shock_ratio*100:.0f}% от spot {observed_spot:.1f}). "
+                f"Persistent shock 12 месяцев исторически unlikely (Hormuz 2026, "
+                f"war 2022, COVID 2020 — все < 12m). Используй scenario='bear' "
+                f"(de-escalation) или 'bull' (escalation), либо обратись к "
+                f"сценарным прогнозам в RAG-корпусе (WOO 2025, IEA Oil 2025)."
+            ),
+        )
+
     if is_scenario_applicable(asset):
-        delta = compute_scenario_delta(scenario_params, asset)
+        delta = compute_scenario_delta(
+            scenario_params, asset, horizon_months=horizon.months,
+        )
     else:
         delta = ScenarioDelta(low=0.0, mid=0.0, high=0.0, driver_breakdown={})
 
-    shifted_points = [_apply_scenario_shift(p, anchor, delta) for p in raw_points]
+    # Price-positive активы — clip CI к [0, +∞) (negative price невозможен)
+    clip_negative = meta.unit in ("USD/bbl", "USD/MMBtu", "EUR/MWh")
+    shifted_points = [
+        _apply_scenario_shift(p, anchor, delta, clip_negative=clip_negative)
+        for p in raw_points
+    ]
 
     # Build result
     result = ForecastResult(
@@ -268,27 +303,41 @@ def _apply_scenario_shift(
     point: ForecastPoint,
     anchor: BaseAnchor,
     delta: ScenarioDelta,
+    *,
+    clip_negative: bool = False,
 ) -> ForecastPoint:
     """Применить anchor + scenario delta к одной точке прогноза.
 
-    Total shift = anchor + delta. Anchor — universal (приводит model output к
-    base scenario level через observation), delta = 0 для base / non-zero для
-    bear/bull. CI расширяется на calibration uncertainty diapazона delta.
+    Total shift = anchor + delta. Anchor — horizon-decayed contribution current
+    state (1m × 1.0 → 12m × 0.15). Delta — scenario shift (0 для base,
+    horizon-scaled для bear/bull). CI расширяется на calibration uncertainty
+    диапазона delta.
+
+    Args:
+        point: исходная raw model точка (без shift).
+        anchor: BaseAnchor с уже применённым horizon decay.
+        delta: ScenarioDelta с уже применённым horizon scaling.
+        clip_negative: если True — clip ci_low к 0 (для price-positive активов).
+                       Negative spot oil/gas физически невозможен; CI шириной
+                       включающей negative — артефакт ensemble union scaled √h.
     """
     a = anchor.anchor_shift
+    new_value = point.value + a + delta.mid
+    ci_80_low = point.ci_80.low + a + delta.low
+    ci_80_high = point.ci_80.high + a + delta.high
+    ci_95_low = point.ci_95.low + a + delta.low
+    ci_95_high = point.ci_95.high + a + delta.high
+
+    if clip_negative:
+        ci_80_low = max(0.0, ci_80_low)
+        ci_95_low = max(0.0, ci_95_low)
+        new_value = max(0.0, new_value)
+
     return ForecastPoint(
         date=point.date,
-        value=point.value + a + delta.mid,
-        ci_80=ConfidenceInterval(
-            level=0.80,
-            low=point.ci_80.low + a + delta.low,
-            high=point.ci_80.high + a + delta.high,
-        ),
-        ci_95=ConfidenceInterval(
-            level=0.95,
-            low=point.ci_95.low + a + delta.low,
-            high=point.ci_95.high + a + delta.high,
-        ),
+        value=new_value,
+        ci_80=ConfidenceInterval(level=0.80, low=ci_80_low, high=ci_80_high),
+        ci_95=ConfidenceInterval(level=0.95, low=ci_95_low, high=ci_95_high),
     )
 
 
@@ -372,26 +421,75 @@ def _forecast_derived(
         brent_fc = _forecast_observable(
             "brent", horizon, method, scenario_params, history_years, use_cache,
         )
+        if isinstance(brent_fc, ForecastRefusal):
+            return _propagate_refusal_to_derived(brent_fc, asset)
         result = derive_urals_forecast(brent_fc)
+        result = _clip_derived_ci(result)
         return _attach_interpretation(result)
 
     if asset == "espo":
         brent_fc = _forecast_observable(
             "brent", horizon, method, scenario_params, history_years, use_cache,
         )
+        if isinstance(brent_fc, ForecastRefusal):
+            return _propagate_refusal_to_derived(brent_fc, asset)
         result = derive_espo_forecast(brent_fc)
+        result = _clip_derived_ci(result)
         return _attach_interpretation(result)
 
     if asset == "urals_minfin_blend":
         brent_fc = _forecast_observable(
             "brent", horizon, method, scenario_params, history_years, use_cache,
         )
+        if isinstance(brent_fc, ForecastRefusal):
+            return _propagate_refusal_to_derived(brent_fc, asset)
         urals_fc = derive_urals_forecast(brent_fc)
         espo_fc = derive_espo_forecast(brent_fc)
         result = derive_minfin_blend_forecast(urals_fc, espo_fc)
+        result = _clip_derived_ci(result)
         return _attach_interpretation(result)
 
     raise ValueError(f"unknown derived asset: {asset!r}")
+
+
+def _propagate_refusal_to_derived(
+    brent_refusal: ForecastRefusal,
+    derived_asset: str,
+) -> ForecastRefusal:
+    """Brent refusal → derived asset refusal с обновлённым asset/reason."""
+    return ForecastRefusal(
+        asset=derived_asset,
+        requested_horizon_months=brent_refusal.requested_horizon_months,
+        reason=(
+            f"Прогноз {derived_asset!r} получается из Brent через derived layer; "
+            f"Brent отказался: {brent_refusal.reason}"
+        ),
+    )
+
+
+def _clip_derived_ci(result: ForecastResult) -> ForecastResult:
+    """Clip CI к 0 для derived price-positive активов.
+
+    Derived layer вычитает spread из Brent CI, что может создать negative low.
+    Negative spot oil невозможен — domain-clip.
+    """
+    new_points: list[ForecastPoint] = []
+    for p in result.points:
+        new_points.append(ForecastPoint(
+            date=p.date,
+            value=max(0.0, p.value),
+            ci_80=ConfidenceInterval(
+                level=0.80,
+                low=max(0.0, p.ci_80.low),
+                high=p.ci_80.high,
+            ),
+            ci_95=ConfidenceInterval(
+                level=0.95,
+                low=max(0.0, p.ci_95.low),
+                high=p.ci_95.high,
+            ),
+        ))
+    return result.model_copy(update={"points": new_points})
 
 
 def _attach_interpretation(result: ForecastResult) -> ForecastResult:

@@ -1,9 +1,13 @@
-"""Ensemble forecaster — простое усреднение SARIMAX + XGBoost.
+"""Ensemble forecaster — усреднение SARIMAX + GBR.
 
-CI: union (min low, max high) — conservative; в эксперименте видно, что часто
-достаточно для номинального покрытия.
+CI v2: **mean of component widths centered on ensemble mean** — заменяет
+v1 union (min low, max high), который давал чудовищно широкий CI на длинных
+horizons (на 12m √h-scaled SARIMAX + GBR conformal residual → ширина >$700
+для нефти, что бесполезно). Mean-of-widths сохраняет калибровку approximately
+(если компоненты independently calibrated — mean width тоже ~калиброванная)
+при ширине ×0.6-0.7 от union.
 
-См. ADR-0012 §«Методы прогноза».
+См. ADR-0012, ADR-0023 §Q1 v3 «CI fix».
 """
 
 from __future__ import annotations
@@ -55,20 +59,44 @@ class EnsembleForecaster(BaseForecaster):
 
         mean_value = sum(p.value for p in end_points) / len(end_points)
 
-        ci_80 = ConfidenceInterval(
-            level=0.80,
-            low=min(p.ci_80.low for p in end_points),
-            high=max(p.ci_80.high for p in end_points),
-        )
-        ci_95 = ConfidenceInterval(
-            level=0.95,
-            low=min(p.ci_95.low for p in end_points),
-            high=max(p.ci_95.high for p in end_points),
-        )
+        # CI v2: mean of component widths, centered on ensemble mean.
+        # Это narrower чем union (min low, max high) и даёт sensible CI на
+        # длинных horizons. Калибровка приблизительно сохраняется при condition
+        # что компоненты independently calibrated.
+        ci_80 = self._averaged_ci(end_points, level=0.80, center=mean_value)
+        ci_95 = self._averaged_ci(end_points, level=0.95, center=mean_value)
 
         return [
             ForecastPoint(date=target_date, value=mean_value, ci_80=ci_80, ci_95=ci_95)
         ]
+
+    @staticmethod
+    def _averaged_ci(
+        end_points: list[ForecastPoint],
+        *,
+        level: float,
+        center: float,
+    ) -> ConfidenceInterval:
+        """Mean of component half-widths, centered on ensemble mean.
+
+        Каждый компонент даёт свой (low, high) для уровня level. Берём
+        среднее half-width = ((high - low) / 2 averaged across components),
+        строим CI = [center - half_width_avg, center + half_width_avg].
+
+        Это narrower чем union, но не теряет calibration: если каждый
+        компонент имеет ~80% empirical coverage, mean width на ~80% покрывает
+        true value около ensemble mean.
+        """
+        half_widths = []
+        for p in end_points:
+            ci = p.ci_80 if level == 0.80 else p.ci_95
+            half_widths.append((ci.high - ci.low) / 2)
+        avg_half_width = sum(half_widths) / len(half_widths)
+        return ConfidenceInterval(
+            level=level,
+            low=center - avg_half_width,
+            high=center + avg_half_width,
+        )
 
 
 __all__ = ["EnsembleForecaster"]

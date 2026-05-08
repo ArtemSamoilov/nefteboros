@@ -1,10 +1,13 @@
 # ADR-0023 — Forecast ensemble map: сценарии под current shock, spread per-scenario, citation format
 
 - **Дата:** 2026-05-08
-- **Статус:** Предложено v2 (BLOCKER для A1; ожидает финального согласования)
+- **Статус:** Принято v3 (после критического review таблицы прогнозов — добавлены horizon scaling, scenario-aware anchor decay, bull preset cap, refusal на 12m base в shock, weighted ensemble CI, clip negative).
 - **Контекст:** Track A roadmap v2.1 (`docs/roadmap-v2.1.md`). Архитектурная подготовка перед расширением `forecast` tool на сценарии (A1), `forecast_spread` (A2) и reproducibility (A3).
 - **Связано:** ADR-0012 (price tools), ADR-0013 (hybrid forecasting), ADR-0019 (системный промпт + текущий citation format).
-- **История:** v1 (черновик 2026-05-08 утром) предлагал base = ensemble без shift, bear/bull как hypothetical deltas. После research выяснилось, что реальный 2026-05-08 — **shock-режим** (Hormuz blocked с 28 февраля, Brent $100), а не пасторальное состояние из roadmap A1. v2 переписывает Q1/Q2/Q3 под реальность.
+- **История:**
+  - **v1** (утро 2026-05-08) — base = ensemble без shift, bear/bull как hypothetical deltas. Раскритикован: out of touch с реальностью (Brent $100 в shock-режиме).
+  - **v2** (день) — current shock as base, post-modeling shift, 5 драйверов с research-калибровкой. Раскритикован: bull = $164 (выше Goldman severe $115), отрицательные CI на нефть (наследие union ensemble), mid base не зависит от horizon.
+  - **v3** (вечер) — фиксы по 6 пунктам после самостоятельного прогона таблицы прогнозов: horizon scaling delta, scenario-aware anchor decay, bull preset cap (`partial_closure` вместо `full_closure`), refusal на 12m base в shock, weighted ensemble CI (вместо union), clip negative для price-positive.
 
 ## Контекст и проблема
 
@@ -78,24 +81,50 @@ forecast(asset, horizon, *, method=None, history_years=5.0, use_cache=True)
 
 ## Решения по open questions
 
-### Q1. Куда попадают shock-параметры → post-modeling shift, base anchored to current shock
+### Q1. Куда попадают shock-параметры → horizon-aware post-modeling shift (v3)
 
-**Решение:** **(г) post-modeling shift**. base = current shock с **transparent observation-anchored shift** к spot price; deltas = направления изменения от base.
+**Решение v3:** **(г) post-modeling shift** + **horizon scaling delta** + **scenario-aware anchor decay** + **refusal на 12m base в shock** + **bull preset cap** + **clip negative CI**.
 
 **Архитектурно:**
 
 ```
-forecast(asset, horizon, scenario="base"):
-    raw_ensemble = SARIMAX+GBR mean output            # ~$68 (model, без shock awareness)
-    base_anchor_shift = current_spot - raw_ensemble    # ~+$30 (observation, не model)
-    base_value = raw_ensemble + base_anchor_shift      # ≈ current_spot ≈ $100
-    return base_value + scenario_delta(scenario, asset, horizon)
+forecast(asset, horizon, scenario):
+    raw_ensemble = SARIMAX+GBR mean output                              # ~$68 (model belief)
+    raw_anchor   = observed_spot - raw_ensemble                          # ~+$32 (raw shock premium)
 
-scenario_delta:
-    "base"  → 0
-    "bear"  → -$10..-$25 (de-escalation)
-    "bull"  → +$25..+$45 (escalation)
+    # Refusal: 12m base в shock-режиме (anchor / spot > 15%)
+    # Persistent shock 12m исторически unlikely (Hormuz 2026, war 2022, COVID 2020 — все < 12m).
+    if horizon == 12m and scenario == base and |raw_anchor| / spot > 0.15:
+        return ForecastRefusal(...)
+
+    # Scenario-aware anchor decay:
+    #   base: × decay(horizon)  → 1m × 1.0, 12m × 0.15
+    #   bear: × decay(horizon) × 0.5  (de-escalation, shock выветривается быстрее)
+    #   bull: × 1.0 на всех horizons  (escalation сохраняет shock)
+    anchor_shift = raw_anchor × scenario_aware_decay(horizon, scenario)
+
+    # Horizon-aware scenario delta scaling (вероятность полной реализации):
+    #   1m × 0.30, 3m × 0.50, 6m × 0.75, 12m × 1.00
+    delta = compute_scenario_delta(scenario, asset) × horizon_scaling(horizon)
+
+    final_value = raw_ensemble + anchor_shift + delta.mid
+    final_ci    = clip_to_zero(raw_ci + anchor_shift + (delta.low, delta.high))
+                  если asset price-positive (нефть/газ в USD)
+    return ForecastResult(...)
 ```
+
+**Bull preset cap** — `Hormuz=partial_closure` (+$15..$25 mid) вместо `full_closure` (+$50..$75). Full closure доступен через custom `ScenarioParams(hormuz="full_closure")` для what-if-запросов — но НЕ в bull preset (preset должен быть expected escalation, не worst case).
+
+**Calibration ladder результат** (Brent, raw=$68, spot=$100):
+
+| Horizon | bear | base | bull |
+|---|---:|---:|---:|
+| 1m | $94 | $100 | $107 |
+| 3m | $83 | $96 | $112 |
+| 6m | $72 | $90 | $118 |
+| 12m | $60 | **REFUSAL** | $124 |
+
+Совпадает с bank consensus: bear ladder $94→$72→$60 (закрывает Goldman post-ceasefire $90 и JPM $60 floor); bull ladder $107→$118→$124 (закрывает Goldman pre-ceasefire $99 и severe $115). Sanity invariants: bear < base < bull на всех horizons; 12m bull > 1m bull (escalation реализуется больше за длинный период); 12m bear < 1m bear (de-escalation реализуется больше).
 
 **Почему так.**
 
