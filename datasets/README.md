@@ -115,24 +115,26 @@ Date,Open,High,Low,Close,Adj Close,Volume
 - `held_out` — true для зафиксированного финального замера (не итерируем промпт на этих кейсах). При корпусе из 10 диалогов: 8 dev / 2 held-out.
 - `messages` — список turn'ов в формате OpenAI/Anthropic. Single-turn = один user message; для `follow_up` — два или больше.
 - `expected_behavior.expected_keywords` — substring matches в финальном ответе (case-insensitive, частичный — ловит «квоты»/«квот»/«квотами» через корень «кво»). Базовая, дешёвая проверка.
-- `expected_min_citations` — минимальное число валидных цитат через [citations validator](../nefteboros/citations/). Для `out_of_scope` и `unknown_with_hypothesis` обычно 0.
-- `must_cite_sources` — substring'и в `source_title` chunks/hits, которые **должны** быть процитированы (semantic).
-- `rubric` — текстовые критерии для optional LLM-as-judge оценки. На baseline'е D6 не используется (deterministic substring + structural только).
+- `expected_min_citations` — минимальное число цитат **в формате** RAG/Web/Forecast в финальном ответе. Считаются [citation парсерами](../nefteboros/citations/patterns.py), без сверки с tool outputs (e2e оценивает финальный итог, не глубину тулов — для семантической сверки см. `eval_citations.py` на `citations_gold.jsonl`).
+- `should_use_rag` / `should_use_web` / `should_call_forecast` — boolean'ы. Используются для citation tool-selection match: если `should_use_rag=true`, в ответе должна быть RAG-цитата в формате; аналогично для web/forecast.
+- `must_cite_sources` — opt'ональные substring'и в `source_title`, которые должны быть процитированы. В e2e не задействовано (overhead semantic сверки), задел для `eval_citations.py`.
+- `rubric` — текстовые критерии для optional LLM-as-judge. На deterministic baseline не используется (substring + structural только).
 
-**Состав корпуса (10 диалогов в первом baseline):**
+**Состав корпуса (50 диалогов, baseline для нахождения проблемных кейсов):**
 
-5 ТЗ-сценариев (по §4.6):
-1. `rag_only` — вопрос про отчёт
-2. `web_only` — свежая новость / spot-цена
-3. `rag_plus_web` — комбо
-4. `forecast` — прогноз с CI
-5. `out_of_scope` — вне нефтегаза
+| Категория | Кол-во | Held-out | Примечание |
+|---|---:|---:|---|
+| `rag_only` | 8 | 1 | Разные источники из manifest (OPEC, Bruegel, Энергостратегия, Новатэк, IEA, Газпром) |
+| `web_only` | 5 | 1 | Spot-цены, свежие новости, RU + EN |
+| `rag_plus_web` | 1 | 0 | Канон ТЗ §4.6 |
+| `forecast` | 8 | 1 | Brent/WTI/Urals/ESPO/HH/TTF, разные горизонты, +1 рефьюз на 24m |
+| `out_of_scope` | 7 | 1 | Погода, крипта, FX, юрист, оценки лиц, инвест-рекомендация, тривиальный |
+| `multi_tool` | 8 | 1 | RAG+forecast, forecast+web, RAG+web, тройные комбо |
+| `follow_up` | 4 | 1 | Двухтурные с переиспользованием контекста |
+| `unknown_with_hypothesis` | 4 | 1 | Запрет на «нет данных» — структурная гипотеза |
+| `adversarial` | 5 | 2 | «Без CI», prompt injection, торговый сигнал, social engineering, «скажи нет данных» |
+| **Всего** | **50** | **9** | dev: 41, held-out: 9 (~18%) |
 
-5 multi-tool / edge:
-6. `multi_tool` — RAG + forecast (санкции и Urals)
-7. `multi_tool` — forecast + web (новости + прогноз)
-8. `multi_tool` — RAG + web (отчёт vs свежие новости)
-9. `follow_up` — двухтурный диалог с переиспользованием первого ответа
-10. `unknown_with_hypothesis` — запрос на стыке, агент даёт структурную гипотезу с маркировкой неопределённости (запрет на «нет данных» из roadmap B1)
+Канон ТЗ §4.6 — диалоги 1-5 (по одной строке на категорию).
 
-При расширении до 30-50 — пропорционально увеличить multi-tool / adversarial / hedging кейсы.
+При расширении до 100+ — балансировать: усилить adversarial (защита от prompt injection из C1/C2) и conflict cases (RAG vs web расхождения).
