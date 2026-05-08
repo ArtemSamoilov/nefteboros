@@ -143,7 +143,13 @@ _WEB_TOOL_DESCRIPTION = (
     "если в корпусе нет — тогда web_search.\n\n"
     "Возвращает JSON: {results: [{title, url, hostname, tier, snippet, "
     "age, published}]}, где tier — 'tier1' (верифицированные деловые) / "
-    "'tier2' (общие СМИ) / 'other'. Цитируй как `[Источник: <hostname>, web]`."
+    "'tier2' (общие СМИ) / 'other'.\n\n"
+    "Цитируй каждый источник markdown-ссылкой:\n"
+    "  `[<title>](<url>) — <hostname>, web`\n"
+    "Пример: `[OPEC keeps quotas](https://www.reuters.com/article/opec) "
+    "— reuters.com, web`.\n"
+    "Title / url / hostname — берутся ДОСЛОВНО из results[i]; никогда "
+    "не выдумывай URL. Если url отсутствует, давай только hostname."
 )
 
 _WEB_TOOL_SCHEMA = {
