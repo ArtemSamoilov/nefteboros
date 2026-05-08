@@ -521,7 +521,17 @@ async def _route_health(request: Request) -> JSONResponse:
 
 
 def register(api: Any) -> None:
-    """Загружается один раз при `load_extension`. Lazy import тяжёлых deps в handler'ах."""
+    """Загружается один раз при `load_extension`. Lazy import тяжёлых deps в handler'ах.
+
+    Note по namespace-discipline: имена tool'ов передаются в `register_tool`
+    как "plain" ("analyst_query", "rag_search", "web_search"); PluginAPI v1
+    автоматически namespace'ит их на runtime в формат
+    `ext_<len>_<token>_<plain>` (см. `ouroboros/extension_loader.py:13`,
+    `_extension_name_prefix`). На сервере регистрируются как
+    `ext_18_r_neftegaz_analyst_*` — изолировано от core-tool registry.
+    Ручной prefix внутри plain-имён НЕ нужен и привёл бы к
+    двойному namespace'ингу.
+    """
     api.register_tool(
         "analyst_query",
         _tool_analyst_query,
