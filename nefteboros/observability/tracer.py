@@ -525,12 +525,41 @@ class _Tracer:
         )
         if self._langfuse_enabled and self._langfuse_client is not None:
             try:
-                lf_span = self._langfuse_client.start_observation(
-                    trace_context={"trace_id": trace.trace_id},
-                    name=node,
-                    as_type=as_type,
-                    input=input_data,
+                # ВАЖНО: чтобы observation стал child (а не отдельным root в
+                # trace), создаём через `parent.start_observation(...)`, не
+                # `client.start_observation(trace_context=...)`. Иначе
+                # Langfuse UI рисует каждый observation как самостоятельный
+                # trace с дублирующимся trace_id.
+                #
+                # Hierarchy:
+                #   parent = текущий открытый _current_span (если есть, для
+                #     вложенности узлов внутри analyst_query span);
+                #   иначе  = root observation для trace (ctx-grouped user-request);
+                #   иначе  = client.start_observation с trace_context (top-level).
+                parent_span = _current_span.get()
+                parent_lf = (
+                    getattr(parent_span, "_lf_span", None)
+                    if parent_span is not None
+                    else None
                 )
+                if parent_lf is None:
+                    parent_lf = self._langfuse_traces.get(trace.trace_id)
+
+                if parent_lf is not None:
+                    lf_span = parent_lf.start_observation(
+                        name=node,
+                        as_type=as_type,
+                        input=input_data,
+                    )
+                else:
+                    # Top-level (нет ни parent span'а ни registered root) —
+                    # привязываем к trace_id напрямую (legacy fallback).
+                    lf_span = self._langfuse_client.start_observation(
+                        trace_context={"trace_id": trace.trace_id},
+                        name=node,
+                        as_type=as_type,
+                        input=input_data,
+                    )
                 setattr(span, "_lf_span", lf_span)
                 setattr(span, "_lf_as_type", as_type)
             except Exception as exc:  # noqa: BLE001
