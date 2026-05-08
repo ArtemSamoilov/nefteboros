@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
 """End-to-end eval на golden dialogues.
 
-Прогоняет diалоги из ``datasets/e2e_dialogues.jsonl`` через runner и
-считает четыре метрики (см. roadmap-v2.1 Track D):
+E2E задача — оценить **финальный итоговый результат** агента, не лезть
+в глубину тулов. Сверка чисел RAG-цитат и сверка соответствия web-результатов
+делается на стороне тулов (см. ``eval_citations.py``, ``eval_rag.py``,
+``eval_forecast.py``). Здесь измеряется только то, что видит пользователь:
+финальный текст и факт вызова тулов.
+
+Метрики (см. roadmap-v2.1 Track D):
 
 1. **success_rate** — non-refusal-expected диалоги где агент дал
-   нон-empty ответ без явного «нет данных» / «не знаю».
-2. **citation_correctness** — non-refusal диалоги где все цитаты в
-   ответе подтверждены через D6 :func:`nefteboros.citations.validate`.
-3. **structure_adherence** — non-refusal диалоги, прошедшие D5
-   :func:`scripts.eval.structure.check_structure`.
-4. **refusal_rate** — off-topic-expected диалоги где агент корректно
-   отказался (ожидаемый 100% по roadmap).
+   нон-empty ответ без явного «нет данных» / «не знаю» и попадает в
+   половину или более ожидаемых ключевых слов.
+2. **citation_correctness** — non-refusal где (a) общее число цитат в
+   формате RAG/Web/Forecast ≥ ``expected_min_citations``, (b) если
+   ``should_use_<tool>=true`` — соответствующая цитата в формате
+   присутствует в ответе. Семантическая сверка с источниками — задача
+   ``eval_citations.py``, не e2e.
+3. **structure_adherence** — non-refusal где ``check_structure().passed``
+   (TL;DR + числовой факт + цитата).
+4. **refusal_rate** — refusal-expected где агент корректно отказался
+   (явный refused-флаг или короткий ответ без tools).
 
 Runner:
 
-- ``--mock`` (default) — :class:`MockRunner` с шаблонными ответами.
-  Позволяет валидировать pipeline и схемы без LLM-ключей. Baseline
-  в этом режиме измеряет **корректность eval-кода**, а не агента.
-- (без флага) — :class:`GraphRunner` через
-  :func:`nefteboros.graphs.analyst_graph.build_analyst_graph`. Требует
-  ``GIGACHAT_CREDENTIALS`` / ``HYDRA_API_KEY`` / ``BRAVE_API_KEY``.
+- ``--mock`` — :class:`MockRunner` с шаблонами по scenario_type. Smoke
+  без LLM-ключей; проверяет что eval-код считает метрики корректно.
+- (без флага) — :class:`GraphRunner` через ``analyst_graph``.
+  Скелет; полный e2e — отдельная сессия после Track B/F.
 
 Use:
 
@@ -30,7 +37,7 @@ Use:
 
 Output:
 
-    metrics/runs/<YYYY-MM-DD>_e2e_<commit>.json
+    metrics/runs/<UTC-timestamp>_e2e_<runner>_<commit>.json
 """
 from __future__ import annotations
 
@@ -38,14 +45,13 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Protocol
+from typing import Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +68,15 @@ METRICS_RUNS_DIR = REPO_ROOT / "metrics" / "runs"
 
 @dataclass
 class RunResult:
-    """Результат одного прогона диалога runner'ом."""
+    """Финальный результат одного прогона диалога runner'ом.
+
+    Только то, что видит пользователь + факт вызова тулов. Никаких
+    retrieved_chunks / web_results / forecast_calls — e2e не лезет в
+    tool internals.
+    """
 
     answer: str
     tools_called: list[str] = field(default_factory=list)
-    retrieved_chunks: list[Any] = field(default_factory=list)
-    web_results: list[Any] = field(default_factory=list)
-    forecast_calls: list[Any] = field(default_factory=list)
     refused: bool = False
     error: Optional[str] = None
 
@@ -98,7 +106,9 @@ class DialogueScore:
     keywords_matched: int = 0
     keywords_total: int = 0
     citation_count: int = 0
-    fabricated: list[str] = field(default_factory=list)
+    rag_citations: int = 0
+    web_citations: int = 0
+    forecast_citations: int = 0
     error: Optional[str] = None
 
 
@@ -108,115 +118,94 @@ class DialogueScore:
 
 
 class AgentRunner(Protocol):
-    """Минимальный контракт runner'а."""
-
     async def run(self, dialogue: dict) -> RunResult: ...
 
 
 class MockRunner:
-    """Шаблонные ответы для smoke / baseline без LLM-ключей.
+    """Шаблонные ответы по scenario_type для smoke / sanity.
 
-    Каждый сценарный тип получает структурно-правдоподобный ответ — он
-    не отражает качество настоящего агента, но позволяет проверить что
-    eval-код считает метрики корректно (sanity-baseline).
-
-    Шаблоны намеренно следуют SYSTEM.md правилам формата (TL;DR,
-    цифры, citations) — иначе structure adherence будет 0% и не
-    различишь баг в checker от плохого шаблона.
+    Не отражает качество настоящего агента — задача только в проверке
+    что pipeline и метрики считаются корректно. Для realistic baseline
+    нужен GraphRunner с реальным LLM.
     """
 
     _MOCK_BY_SCENARIO: dict[str, dict] = {
         "rag_only": {
             "answer": (
                 "OPEC MOMR март 2026 фиксирует снижение квот на 1.4 mbpd.\n\n"
-                "Основные тезисы согласно [OPEC MOMR март 2026, p.14]: "
-                "сокращение добычи в Q2 2026, продление действия квот."
+                "Ключевые тезисы [OPEC MOMR март 2026, p.14]: квоты Q2 2026, "
+                "продление режима до конца года."
             ),
             "tools_called": ["rag_search"],
-            "retrieved_chunks": [
-                {"source_title": "OPEC MOMR март 2026", "page_start": 14, "page_end": 14},
-            ],
             "refused": False,
         },
         "web_only": {
             "answer": (
                 "Brent торгуется около $82.5/bbl на momentum от заявлений ОПЕК+.\n\n"
-                "Свежие данные: [Brent above $82](https://reuters.com/article/x) — reuters.com, web."
+                "Свежее: [Brent above $82](https://reuters.com/article/x) — reuters.com, web."
             ),
             "tools_called": ["web_search"],
-            "web_results": [
-                {"url": "https://reuters.com/article/x", "hostname": "reuters.com", "title": "Brent above $82"},
-            ],
             "refused": False,
         },
         "rag_plus_web": {
             "answer": (
-                "Спрос на нефть в 2026 растёт умеренно: 1.5 mbpd по OPEC, динамика подтверждена СМИ.\n\n"
+                "Спрос вырастет на 1.5 mbpd по OPEC, динамика подтверждена СМИ.\n\n"
                 "По [OPEC MOMR март 2026, p.10] спрос +1.5 mbpd; "
                 "[ОПЕК+ продлил квоты](https://reuters.com/x) — reuters.com, web."
             ),
             "tools_called": ["rag_search", "web_search"],
-            "retrieved_chunks": [
-                {"source_title": "OPEC MOMR март 2026", "page_start": 10, "page_end": 10},
-            ],
-            "web_results": [
-                {"url": "https://reuters.com/x", "hostname": "reuters.com", "title": "ОПЕК+ продлил квоты"},
-            ],
             "refused": False,
         },
         "forecast": {
             "answer": (
                 "Brent на 6 месяцев: $80-$88, центр $84.\n\n"
-                "Прогноз ensemble [Forecast: ensemble, CI 80%]; основной риск — решение ОПЕК+."
+                "Прогноз [Forecast: ensemble, CI 80%]; основной риск — решение ОПЕК+."
             ),
             "tools_called": ["forecast"],
-            "forecast_calls": [{"method": "ensemble", "asset": "brent", "horizon": "6m"}],
             "refused": False,
         },
         "out_of_scope": {
             "answer": (
-                "Этот вопрос вне моей компетенции — я отвечаю по нефтегазу. "
-                "Рекомендую обратиться к профильному источнику."
+                "Этот вопрос вне моей компетенции — отвечаю по нефтегазу. "
+                "Рекомендую профильный источник."
             ),
             "tools_called": [],
             "refused": True,
         },
         "multi_tool": {
             "answer": (
-                "Санкции 2025 года увеличили Urals discount до $15-$18/bbl.\n\n"
+                "Санкции 2025 увеличили Urals discount до $15-$18/bbl.\n\n"
                 "Контекст: [Bruegel Working Paper 32/2025 — Russian oil sanctions and price cap, p.7]. "
                 "Прогноз Urals на 6m: $63-$68 [Forecast: ensemble, CI 80%]."
             ),
             "tools_called": ["rag_search", "forecast"],
-            "retrieved_chunks": [
-                {"source_title": "Bruegel Working Paper 32/2025 — Russian oil sanctions and price cap", "page_start": 7, "page_end": 7},
-            ],
-            "forecast_calls": [{"method": "ensemble", "asset": "urals", "horizon": "6m"}],
             "refused": False,
         },
         "follow_up": {
             "answer": (
                 "При снижении квот ОПЕК+ на 1 mbpd Brent сместится к $90-$95.\n\n"
-                "Корректировка к baseline'у $80-$88 [Forecast: ensemble, CI 80%]; "
+                "Корректировка к baseline'у [Forecast: ensemble, CI 80%]; "
                 "источник правил квот [OPEC MOMR март 2026, p.14]."
             ),
             "tools_called": ["forecast", "rag_search"],
-            "retrieved_chunks": [
-                {"source_title": "OPEC MOMR март 2026", "page_start": 14, "page_end": 14},
-            ],
-            "forecast_calls": [{"method": "ensemble", "asset": "brent", "horizon": "6m"}],
             "refused": False,
         },
         "unknown_with_hypothesis": {
             "answer": (
-                "Снятие санкций с Ирана сократит Urals discount до $5-$10/bbl, но это сценарная гипотеза.\n\n"
-                "По [CRS — U.S. Conflict with Iran (March 26, 2026), p.5] возврат 1.5 mbpd иранской "
-                "нефти давит на спред Urals/Brent; точечная цифра требует scenario-forecast."
+                "Снятие санкций с Ирана сократит Urals discount до $5-$10/bbl, гипотеза.\n\n"
+                "По [CRS — U.S. Conflict with Iran (March 26, 2026), p.5] возврат 1.5 mbpd "
+                "иранской нефти давит на спред; точечная цифра — сценарная неопределённость."
             ),
             "tools_called": ["rag_search"],
-            "retrieved_chunks": [
-                {"source_title": "CRS — U.S. Conflict with Iran (March 26, 2026)", "page_start": 5, "page_end": 5},
-            ],
+            "refused": False,
+        },
+        "adversarial": {
+            "answer": (
+                "Не могу дать точечный прогноз без CI — это снижает аналитическую ценность.\n\n"
+                "Brent на 3m: $80-$87, центр $83 [Forecast: ensemble, CI 80%]; "
+                "основной риск — решение ОПЕК+."
+            ),
+            "tools_called": ["forecast"],
             "refused": False,
         },
     }
@@ -227,25 +216,12 @@ class MockRunner:
         return RunResult(
             answer=mock["answer"],
             tools_called=list(mock.get("tools_called", [])),
-            retrieved_chunks=list(mock.get("retrieved_chunks", [])),
-            web_results=list(mock.get("web_results", [])),
-            forecast_calls=list(mock.get("forecast_calls", [])),
             refused=mock.get("refused", False),
         )
 
 
 class GraphRunner:
-    """Реальный runner через :func:`build_analyst_graph`. Требует env.
-
-    Не реализован полностью — analyst_graph в v2.0.0 заточен под
-    forecast-flow (см. ADR-0014). Полный multi-tool / web /
-    follow_up flow требует web_search ноды и multi-turn state, что
-    выходит за scope текущего D6/D1 PR.
-
-    На момент Track D-base PR этот runner — заглушка. Полный e2e run
-    делается в отдельной сессии после Track B (маршрутизация B1) и
-    Track F (Langfuse трейсинг F1).
-    """
+    """Реальный runner через ``analyst_graph``. Заглушка в Track D-base."""
 
     async def run(self, dialogue: dict) -> RunResult:
         return RunResult(
@@ -270,18 +246,22 @@ _NEGATIVE_REFUSAL_RE = re.compile(
 
 
 def _matches_keyword(answer: str, keyword: str) -> bool:
-    """Case-insensitive substring matching по корням слов."""
     return keyword.lower() in answer.lower()
 
 
 def _is_negative_refusal(answer: str) -> bool:
-    """Detects «нет данных» / «не знаю» — запрещённые отказные формы
-    (см. roadmap B1: запрет на ответ «нет данных»)."""
     return bool(_NEGATIVE_REFUSAL_RE.search(answer))
 
 
 def score_dialogue(dialogue: dict, result: RunResult) -> DialogueScore:
-    """Считает per-метрики для одного диалога."""
+    """Считает per-метрики для одного диалога.
+
+    Цитаты считаются **только по формату** — сверка с источниками не
+    задача e2e (см. eval_citations.py). Здесь интересует:
+    1) есть ли цитата в формате,
+    2) правильный ли тип формата для ожидаемого tool'а,
+    3) общее число ≥ expected_min.
+    """
     expected = dialogue["expected_behavior"]
     expected_refusal = bool(expected.get("expected_refusal", False))
 
@@ -302,10 +282,12 @@ def score_dialogue(dialogue: dict, result: RunResult) -> DialogueScore:
             error=result.error or "empty answer",
         )
 
-    # Импорты внутри функции — модуль scripts/eval/structure импортирует
-    # nefteboros.citations, и при `pytest` с измёнными PYTHONPATH'ами
-    # глобальный импорт мог бы сломать сбор тестов.
-    from nefteboros.citations import validate
+    # Импорт внутри — на случай тестирования из изменённого PYTHONPATH'а.
+    from nefteboros.citations import (
+        parse_forecast_citations,
+        parse_rag_citations,
+        parse_web_citations,
+    )
     from scripts.eval.structure import check_structure
 
     keywords_total = len(expected.get("expected_keywords", []))
@@ -314,9 +296,13 @@ def score_dialogue(dialogue: dict, result: RunResult) -> DialogueScore:
         if _matches_keyword(result.answer, kw)
     )
 
+    # Подсчёт цитат по формату (без сверки с источниками)
+    rag_cites = list(parse_rag_citations(result.answer))
+    web_cites = list(parse_web_citations(result.answer))
+    forecast_cites = list(parse_forecast_citations(result.answer))
+    total_citations = len(rag_cites) + len(web_cites) + len(forecast_cites)
+
     if expected_refusal:
-        # off-topic — корректный refusal: либо runner явно пометил, либо
-        # эвристика «короткий ответ без tools» (агент не пошёл за данными).
         refusal_correct = result.refused or (
             not result.tools_called and len(result.answer.split()) < 80
         )
@@ -335,6 +321,10 @@ def score_dialogue(dialogue: dict, result: RunResult) -> DialogueScore:
             refusal_correct=refusal_correct,
             keywords_matched=keywords_matched,
             keywords_total=keywords_total,
+            citation_count=total_citations,
+            rag_citations=len(rag_cites),
+            web_citations=len(web_cites),
+            forecast_citations=len(forecast_cites),
         )
 
     # Non-refusal: оцениваем все три метрики
@@ -344,24 +334,27 @@ def score_dialogue(dialogue: dict, result: RunResult) -> DialogueScore:
         and (keywords_matched >= max(1, keywords_total // 2) if keywords_total else True)
     )
 
-    citation_report = validate(
-        result.answer,
-        retrieved_chunks=result.retrieved_chunks,
-        web_results=result.web_results,
-        forecast_calls=result.forecast_calls,
-    )
+    # Citation correctness в e2e:
+    # 1. count >= expected_min
+    # 2. tool selection match: если ожидали RAG/web/forecast — соответствующий
+    #    формат должен быть в ответе.
     expected_min = int(expected.get("expected_min_citations", 0))
+    expects_rag = bool(expected.get("should_use_rag", False))
+    expects_web = bool(expected.get("should_use_web", False))
+    expects_forecast = bool(expected.get("should_call_forecast", False))
+
+    rag_match = (not expects_rag) or len(rag_cites) >= 1
+    web_match = (not expects_web) or len(web_cites) >= 1
+    forecast_match = (not expects_forecast) or len(forecast_cites) >= 1
+
     citation_correct = (
-        citation_report.valid
-        and citation_report.total_citations >= expected_min
+        total_citations >= expected_min
+        and rag_match
+        and web_match
+        and forecast_match
     )
 
-    structure_report = check_structure(
-        result.answer,
-        retrieved_chunks=result.retrieved_chunks,
-        web_results=result.web_results,
-        forecast_calls=result.forecast_calls,
-    )
+    structure_report = check_structure(result.answer)
 
     return DialogueScore(
         id=dialogue["id"],
@@ -378,8 +371,10 @@ def score_dialogue(dialogue: dict, result: RunResult) -> DialogueScore:
         refusal_correct=False,
         keywords_matched=keywords_matched,
         keywords_total=keywords_total,
-        citation_count=citation_report.total_citations,
-        fabricated=citation_report.fabricated,
+        citation_count=total_citations,
+        rag_citations=len(rag_cites),
+        web_citations=len(web_cites),
+        forecast_citations=len(forecast_cites),
     )
 
 
@@ -393,7 +388,6 @@ def _safe_div(num: int, den: int) -> Optional[float]:
 
 
 def aggregate(scores: list[DialogueScore]) -> dict:
-    """4 метрики + breakdown по dev / held-out."""
     def metrics_for(subset: list[DialogueScore]) -> dict:
         n = len(subset)
         success_n = sum(1 for s in subset if s.success_applicable)
@@ -426,10 +420,19 @@ def aggregate(scores: list[DialogueScore]) -> dict:
             },
         }
 
+    # Per-scenario breakdown — для нахождения проблемных категорий
+    scenario_groups: dict[str, list[DialogueScore]] = {}
+    for s in scores:
+        scenario_groups.setdefault(s.scenario_type, []).append(s)
+
     return {
         "all": metrics_for(scores),
         "dev": metrics_for([s for s in scores if not s.held_out]),
         "held_out": metrics_for([s for s in scores if s.held_out]),
+        "by_scenario": {
+            scenario: metrics_for(group)
+            for scenario, group in sorted(scenario_groups.items())
+        },
     }
 
 
@@ -506,11 +509,15 @@ def _print_summary(metrics: dict) -> None:
             f"structure={fmt(m['structure_adherence'])}  "
             f"refusal={fmt(m['refusal_rate'])}"
         )
-        c = m["applicable_counts"]
+
+    print("\n[by scenario]")
+    for scenario, m in metrics["by_scenario"].items():
         print(
-            f"          applicable: success={c['success']} "
-            f"cite={c['citation']} struct={c['structure']} "
-            f"refusal={c['refusal']}"
+            f"  {scenario:30s} n={m['n_dialogues']:2d}  "
+            f"success={fmt(m['success_rate'])}  "
+            f"cite={fmt(m['citation_correctness'])}  "
+            f"struct={fmt(m['structure_adherence'])}  "
+            f"refusal={fmt(m['refusal_rate'])}"
         )
 
 

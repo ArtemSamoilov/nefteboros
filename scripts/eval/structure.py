@@ -1,18 +1,19 @@
 """Structure adherence checker для ответов агента (D5).
 
 Системный промпт ([prompts/SYSTEM.md](../../prompts/SYSTEM.md)) обязывает
-структурированный ответ. D5 определяет три измеримых критерия:
+структурированный ответ. D5 определяет три измеримых критерия,
+оцениваемых **только по финальному тексту агента**:
 
 1. **TL;DR** — первый параграф ≤2 предложений (либо весь ответ ≤2 предл.).
 2. **Числовой факт** — хотя бы одно число в ответе (цена, %, объём, год).
-3. **Citation** — хотя бы одна цитата в формате RAG/Web/Forecast.
+3. **Citation в формате** — хотя бы одна цитата в формате RAG/Web/Forecast.
 
-Не реализуется в этом модуле:
+Не реализуется здесь:
 
-- *Диапазон vs точка для price-related ответов* — требует D2 hedging,
-  отложено в roadmap-v2.1 D5 «не делаем, требует D2».
-- *LLM-judge оценка качества TL;DR* — substring/regex дешевле и
-  достаточен для baseline (см. open question Q2 в roadmap D6).
+- *Сверка цитат с tool outputs* — задача отдельного integration-eval'а
+  (см. ``scripts/eval/eval_citations.py`` на ``citations_gold.jsonl``).
+  E2E проверяет финальный итог, не глубину тулов.
+- *Диапазон vs точка для price-related ответов* — требует D2 hedging.
 
 Используется в [eval_e2e.py](eval_e2e.py).
 """
@@ -21,17 +22,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from nefteboros.citations import validate
+from nefteboros.citations import (
+    parse_forecast_citations,
+    parse_rag_citations,
+    parse_web_citations,
+)
 
 # =============================================================================
 # Regex'ы
 # =============================================================================
 
 #: Числовой факт — любое число (целое, десятичное, с запятой как разделителем).
-#: Покрывает: ``80``, ``1.5``, ``2.4``, ``80,5``, ``234``, ``1900`` (года).
 _NUMERIC_RE = re.compile(r"\b\d+(?:[.,]\d+)?\b")
 
-#: Splitter предложений — после ``.``/``!``/``?`` следует пробел или конец строки.
+#: Splitter предложений.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 
@@ -42,10 +46,7 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 @dataclass
 class StructureReport:
-    """Результат проверки structure adherence.
-
-    ``passed=True`` ⇔ все три проверки прошли.
-    """
+    """Результат проверки structure adherence."""
 
     has_tldr: bool
     has_numeric_fact: bool
@@ -65,8 +66,6 @@ class StructureReport:
 
 
 def _count_sentences(text: str) -> int:
-    """Грубая оценка числа предложений. Достаточная для D5 — ловим
-    «параграф ≤2 предложений» vs «параграф из 3+ предложений»."""
     if not text.strip():
         return 0
     parts = [p for p in _SENTENCE_SPLIT_RE.split(text.strip()) if p.strip()]
@@ -74,7 +73,6 @@ def _count_sentences(text: str) -> int:
 
 
 def _first_paragraph(text: str) -> str:
-    """Первый параграф = до первой пустой строки."""
     return text.strip().split("\n\n", 1)[0].strip()
 
 
@@ -83,20 +81,12 @@ def _first_paragraph(text: str) -> str:
 # =============================================================================
 
 
-def check_structure(
-    answer: str,
-    *,
-    retrieved_chunks=None,
-    web_results=None,
-    forecast_calls=None,
-) -> StructureReport:
-    """Проверить структурную адекватность ответа.
+def check_structure(answer: str) -> StructureReport:
+    """Проверить структурную адекватность ответа агента.
 
     Args:
-        answer: финальный текст агента.
-        retrieved_chunks/web_results/forecast_calls: передаются в citation
-            validator. Если все None — citation_count считается по
-            извлечённым из текста цитатам без проверки соответствия.
+        answer: финальный текст. Никаких tool outputs — e2e проверяет
+            итоговый результат.
 
     Returns:
         StructureReport с per-criterion флагами и счётчиками.
@@ -105,24 +95,19 @@ def check_structure(
     para_one = _first_paragraph(answer)
     tldr_sentences = _count_sentences(para_one)
     full_sentences = _count_sentences(answer)
-    # «Есть TL;DR» если первый параграф ≤2 sentences ИЛИ весь ответ ≤2 sentences.
-    has_tldr = (tldr_sentences > 0 and tldr_sentences <= 2) or (
-        full_sentences > 0 and full_sentences <= 2
-    )
+    has_tldr = (0 < tldr_sentences <= 2) or (0 < full_sentences <= 2)
 
     # 2. Numeric fact
     numeric_matches = _NUMERIC_RE.findall(answer)
     numeric_count = len(numeric_matches)
     has_numeric_fact = numeric_count >= 1
 
-    # 3. Citation — через D6 validator (учитывает все 3 формата).
-    report = validate(
-        answer,
-        retrieved_chunks=retrieved_chunks,
-        web_results=web_results,
-        forecast_calls=forecast_calls,
+    # 3. Citation в формате — через парсеры (без сверки с источниками).
+    citation_count = (
+        len(list(parse_rag_citations(answer)))
+        + len(list(parse_web_citations(answer)))
+        + len(list(parse_forecast_citations(answer)))
     )
-    citation_count = report.total_citations
     has_citation = citation_count >= 1
 
     return StructureReport(
