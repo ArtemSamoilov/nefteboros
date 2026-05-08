@@ -231,7 +231,7 @@ def _serialize_citations(state: Any) -> list[dict[str, Any]]:
 
 
 @traced_tool(name="analyst_query")
-def _tool_analyst_query(*, query: str = "") -> str:
+def _tool_analyst_query(ctx: Any = None, *, query: str = "") -> str:
     """PluginAPI tool handler. Возвращает JSON-string.
 
     Resilient — не падает на graph error / LLM error / forecast error.
@@ -329,7 +329,7 @@ def _serialize_rag_hit(hit: Any) -> dict[str, Any]:
 
 
 @traced_tool(name="rag_search")
-def _tool_rag_search(*, query: str = "", k: int = _RAG_DEFAULT_K) -> str:
+def _tool_rag_search(ctx: Any = None, *, query: str = "", k: int = _RAG_DEFAULT_K) -> str:
     """PluginAPI tool handler. Возвращает JSON-string.
 
     Resilient — на любых ошибках (Retriever/Chroma/embedder unavailable)
@@ -417,6 +417,7 @@ def _serialize_web_hit(hit: Any) -> dict[str, Any]:
 
 @traced_tool(name="web_search")
 def _tool_web_search(
+    ctx: Any = None,
     *,
     query: str = "",
     freshness: str = "pw",

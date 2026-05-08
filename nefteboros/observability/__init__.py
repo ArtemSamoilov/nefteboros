@@ -175,56 +175,105 @@ def end_trace(trace: Trace, *, answer: Optional[str] = None) -> None:
     tracer.end_trace(trace, answer=answer)
 
 
+def _extract_request_id(ctx: Any) -> Optional[str]:
+    """Достать request-id (task_id или chat_id) из ouroboros ToolContext.
+
+    Один user-request → один trace. ToolContext общий для всех tool вызовов
+    одного task'а в ouroboros loop.py — task_id используется как primary
+    ключ. current_chat_id как fallback (один чат = одна сессия).
+    """
+    if ctx is None:
+        return None
+    task_id = getattr(ctx, "task_id", None)
+    if task_id:
+        return f"task:{task_id}"
+    chat_id = getattr(ctx, "current_chat_id", None)
+    if chat_id:
+        return f"chat:{chat_id}"
+    return None
+
+
 def traced_tool(
     *, name: Optional[str] = None, query_arg: str = "query"
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Декоратор для Ouroboros tool entry points — открывает top-level trace.
+    """Декоратор для Ouroboros tool entry points — group по user-request.
 
-    Применяется к sync tool handler'ам в `skills/*/plugin.py`, которые
-    Ouroboros вызывает через `register_tool(...)`. Один tool вызов = один
-    e2e trace в Langfuse, span'ы внутренних узлов LangGraph (через
-    `observe`) прицепятся к нему через contextvars.
+    Применяется к sync tool handler'ам в `skills/*/plugin.py`. Ouroboros
+    вызывает их как `handler(ctx, **args)`, где `ctx.task_id` общий для всех
+    tool вызовов одного user-request (см. `ouroboros.tools.registry.ToolContext`).
 
-    Внутренний `asyncio.run(graph.ainvoke(...))` пропагирует contextvars
-    в новый event loop — узлы графа видят `_current_trace`.
+    **Один user-request = один trace в Langfuse:**
+    - Первый tool вызов открывает trace, кладёт в registry по `ctx.task_id`.
+    - Последующие tools (любого имени) добавляют свои span'ы в **тот же**
+      trace через `trace_context={"trace_id": ...}`.
+    - Trace закрывается по TTL (10 мин без новых вызовов) или atexit.
+
+    **Узлы LangGraph внутри analyst_query** прицепляются к user-request
+    trace через contextvars (asyncio.run пропагирует context в child loop).
+
+    Сигнатура handler'а: `def my_tool(ctx=None, *, query: str = "")` —
+    ouroboros сначала пробует `handler(ctx, **args)`, при TypeError —
+    `handler(**args)`. Default `ctx=None` поддерживает оба вызова.
 
     Args:
-        name: имя trace в Langfuse UI (default — fn.__name__).
-        query_arg: имя kwarg, содержащего пользовательский query (для input
-            top-level observation). По умолчанию "query".
-
-    Поведение при exception:
-        Trace закрывается с answer=None и status=error (если узел графа
-        бросил), исключение re-raise — Ouroboros tool dispatcher ловит сам.
+        name: имя для span'а текущего tool в Langfuse UI (default — fn.__name__).
+            На root trace имя берётся из первого tool в request'е.
+        query_arg: имя kwarg с user-query (для input root observation).
     """
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        trace_name = name or fn.__name__
+        tool_name = name or fn.__name__
 
         @functools.wraps(fn)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
+            # Извлекаем ctx (первый позиционный) и query.
+            ctx = args[0] if args else None
             query_value: Optional[str] = None
             v = kwargs.get(query_arg)
             if isinstance(v, str):
                 query_value = v
-            elif args and isinstance(args[0], str):
-                query_value = args[0]
 
-            trace = start_trace(query=query_value, name=trace_name)
-            token = _current_trace.set(trace)
+            tracer = get_tracer()
+            request_id = _extract_request_id(ctx)
+
+            # Получить или открыть trace на user-request. Если ctx.task_id
+            # отсутствует (legacy/CLI вызов), trace не регистрируется — мы
+            # его закрываем сразу после tool вызова, иначе он висит до atexit.
+            trace, is_new = tracer.get_or_create_trace_for_request(
+                request_id, query_value, name="user_request"
+            )
+            is_legacy_unregistered = is_new and not request_id
+
+            trace_token = _current_trace.set(trace)
+            tool_span = tracer.start_span(
+                tool_name,
+                trace=trace,
+                input_data={"query": query_value} if query_value else None,
+                as_type="tool",
+            )
+            span_token = _current_span.set(tool_span)
+
             try:
                 result = fn(*args, **kwargs)
-                # Tool возвращает JSON-string — это и есть ответ для trace.
-                end_trace(
-                    trace,
-                    answer=result if isinstance(result, str) else None,
+                output_data: Optional[dict[str, Any]] = None
+                if isinstance(result, str):
+                    output_data = {"answer_chars": len(result)}
+                tracer.end_span(
+                    tool_span, status="ok", output_data=output_data, trace=trace
                 )
+                if is_legacy_unregistered:
+                    # Legacy путь без ctx — закрываем trace сразу, иначе он
+                    # висит до atexit без summary-строки.
+                    end_trace(trace, answer=result if isinstance(result, str) else None)
                 return result
-            except BaseException:
-                end_trace(trace, answer=None)
+            except BaseException as exc:
+                tracer.end_span(tool_span, status="error", error=exc, trace=trace)
+                if is_legacy_unregistered:
+                    end_trace(trace, answer=None)
                 raise
             finally:
-                _current_trace.reset(token)
+                _current_span.reset(span_token)
+                _current_trace.reset(trace_token)
 
         return wrapped
 

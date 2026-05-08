@@ -56,20 +56,61 @@ skills/neftegaz_analyst/plugin.py
 
 Декораторы графа навешиваются **в builder'е** — файлы `nefteboros/graphs/nodes/*.py` остаются доменными. Tool entry points в `plugin.py` декорируются `@traced_tool` — это **e2e trace на каждый tool вызов** от Ouroboros agent loop'а до возврата JSON. Единственное вмешательство в узлы графа — `log_llm_usage(usage)` в `synthesize._call_llm` после `chat_async` (3 строки), и аналогично в `llm_disambiguate` после `chat.ainvoke` (только когда fallback-путь, см. §«Known limitations»).
 
-### Trace lifecycle (e2e через tool entry point)
+### Trace lifecycle (один user-request = один trace)
 
-Production-путь — Ouroboros agent loop вызывает наш tool, top-level trace рождается **там**:
+**Цель:** агент в Ouroboros loop'е может за один user-request дёрнуть несколько tools (например `rag_search` → `analyst_query` → `web_search`). Все эти вызовы должны попасть в **один** trace в Langfuse — иначе оценщик видит фрагменты вместо целого запроса.
 
-1. Ouroboros dispatcher вызывает `_tool_analyst_query(query="...")` (зарегистрирован через PluginAPI v1).
-2. `@traced_tool(name="analyst_query")` декоратор → `start_trace(query=..., name="analyst_query")` → создаёт `Trace` + Langfuse root observation, кладёт в `_current_trace` contextvar.
-3. Внутри tool: `asyncio.run(graph.ainvoke(state))` — `asyncio.run` пропагирует contextvars в новый event loop, узлы графа видят `_current_trace`.
-4. Каждый узел через `observe`-wrap → `start_span(trace_context={"trace_id": ...})` → child observation в Langfuse.
-5. Узел внутри — `log_llm_usage(usage)` прикрепляет tokens/cost к текущему span'у через `_current_span` contextvar.
-6. На return из tool — `end_trace` → answer = JSON-string, span_count = 4-5, total_cost_usd, total_latency_ms.
+**Механизм:** Ouroboros вызывает tool handler как `handler(ctx, **args)`, где `ctx: ToolContext` (см. `ouroboros.tools.registry.ToolContext`) общий для всех tool вызовов одного task'а. Используем `ctx.task_id` (fallback `current_chat_id`) как ключ для группировки.
 
-`invoke_with_trace(graph, state)` — альтернативный entry для прямого вызова графа из CLI / eval scripts (не через tool dispatcher). Внутри делает то же самое.
+```
+Ouroboros agent loop  (one user-request, one task_id "T_42")
+   │
+   ├─ tool_call("rag_search", args)
+   │     handler(ctx, query=...)     ── ctx.task_id = "T_42"
+   │       └─ traced_tool: get_or_create_trace_for_request("task:T_42")
+   │             │  not in registry → create new Langfuse root span
+   │             └─ store: registry["task:T_42"] = trace
+   │       └─ child span "rag_search" → trace
+   │
+   ├─ tool_call("analyst_query", args)
+   │     handler(ctx, query=...)     ── тот же ctx.task_id
+   │       └─ traced_tool: get_or_create — found existing trace ✓
+   │       └─ child span "analyst_query" → graph.ainvoke
+   │            ├─ child "classify_intent"   (через _current_trace contextvar)
+   │            ├─ child "forecast_call"
+   │            ├─ child "synthesize"        (as_type=generation, cost/tokens)
+   │            └─ child "validate_citations"
+   │
+   └─ tool_call("web_search", args)
+         handler(ctx, query=...)     ── тот же task_id
+         └─ child span "web_search" в том же trace
 
-`rag_search` / `web_search` — плоские tools, e2e trace без child observations. При добавлении инструментации в Retriever / WebSearcher (потенциально в roadmap v2.2) — child spans прицепятся через тот же contextvars механизм.
+→ В Langfuse: один root observation с 7 child spans, total_cost = sum, total_latency = wall.
+```
+
+**Регистрация и закрытие trace:**
+
+- `tracer._request_traces: dict[str, Trace]` — registry активных traces по `task_id`/`chat_id`. Lock'ом защищён.
+- **Открытие**: первый tool вызов с данным request_id создаёт trace через `start_trace`, кладёт в registry.
+- **Переиспользование**: последующие tools находят trace в registry, добавляют child observations через `trace_context={"trace_id": existing}`.
+- **Закрытие — три пути**:
+  1. **Явный** через `tracer.close_trace_for_request(request_id, answer=...)` — если внешний код (loop hook) знает что user-request завершён.
+  2. **TTL** — 10 минут без новых tool вызовов → cleanup при следующем `get_or_create`. Защита от утечек если task завершился без сигнала.
+  3. **`atexit`** — все активные traces закрываются + `langfuse.flush()` при завершении процесса. Гарантирует доставку.
+
+**Legacy fallback** (вызов без `ctx`, e.g., из CLI / eval scripts): `_extract_request_id` возвращает None → trace **не регистрируется** → закрывается **сразу** после tool вызова (старое поведение, один tool = один trace). Это совместимо с прямым `python -m scripts.eval.eval_e2e`.
+
+**`invoke_with_trace(graph, state)`** в `analyst_graph.py` остаётся для прямого вызова графа без Ouroboros tool dispatcher — открывает trace на один graph.ainvoke (legacy путь).
+
+### Сигнатура tool handlers
+
+```python
+@traced_tool(name="analyst_query")
+def _tool_analyst_query(ctx: Any = None, *, query: str = "") -> str:
+    ...
+```
+
+Ouroboros сначала пробует `handler(self._ctx, **args)`. Если handler принимает `ctx` — получит ToolContext. `ctx=None` default поддерживает legacy `handler(**args)` fallback при TypeError.
 
 ### JSON-trace формат
 

@@ -132,9 +132,22 @@ class _Tracer:
         self._next_span_id = 1
         self._langfuse_enabled = False
         self._langfuse_client: Any = None
-        self._langfuse_traces: dict[str, Any] = {}  # trace_id → langfuse trace object
+        self._langfuse_traces: dict[str, Any] = {}  # trace_id → langfuse root observation
+
+        # Registry «один user-request = один trace»: ouroboros ToolContext
+        # передаёт task_id (или current_chat_id) — common для всех tool
+        # вызовов одного запроса. Первый tool открывает trace, последующие
+        # переиспользуют. Очистка через TTL + atexit. См. ADR-0025
+        # §«Trace lifecycle (e2e)».
+        self._request_traces: dict[str, Trace] = {}
+        self._request_traces_lock = threading.Lock()
+        # Heartbeat: последняя активность по request_id, для TTL cleanup.
+        self._request_last_seen: dict[str, float] = {}
+        # Default TTL — 10 минут без новых tool вызовов → закрываем trace.
+        self._request_ttl_sec = 600.0
 
         self._init_langfuse()
+        self._register_atexit()
 
     # --- init ---
 
@@ -277,6 +290,124 @@ class _Tracer:
             h.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
         except OSError as exc:
             logger.warning("JSON-trace write failed: %s", exc)
+
+    # --- atexit / TTL cleanup ---
+
+    def _register_atexit(self) -> None:
+        """Закрыть все активные traces и flush Langfuse при завершении процесса.
+
+        Гарантирует что user-request trace, открытый первым tool вызовом,
+        точно закроется — даже если последний tool не помечал свою итерацию
+        как «завершающую».
+        """
+        import atexit
+
+        atexit.register(self._shutdown)
+
+    def _shutdown(self) -> None:
+        """Закрыть все открытые user-request traces."""
+        with self._request_traces_lock:
+            traces = list(self._request_traces.values())
+            self._request_traces.clear()
+            self._request_last_seen.clear()
+        for trace in traces:
+            try:
+                self.end_trace(trace, answer=None)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("atexit end_trace failed: %s", exc)
+        # Финальный flush Langfuse — гарантирует доставку.
+        if self._langfuse_enabled and self._langfuse_client is not None:
+            try:
+                self._langfuse_client.flush()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("atexit langfuse flush failed: %s", exc)
+
+    def _cleanup_stale_traces(self) -> None:
+        """Закрыть traces, которые не получали новых tool вызовов > TTL.
+
+        Защита от утечек если ouroboros task завершился без сигнала нам
+        (e.g., ошибка LLM, exit пользователя в чате). Вызывается перед
+        каждым новым get_or_create.
+        """
+        now = time.monotonic()
+        stale: list[tuple[str, Trace]] = []
+        with self._request_traces_lock:
+            for req_id, last in list(self._request_last_seen.items()):
+                if now - last > self._request_ttl_sec:
+                    trace = self._request_traces.pop(req_id, None)
+                    self._request_last_seen.pop(req_id, None)
+                    if trace is not None:
+                        stale.append((req_id, trace))
+        for req_id, trace in stale:
+            logger.info("observability: closing stale trace for request_id=%s", req_id)
+            try:
+                self.end_trace(trace, answer=None)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("stale end_trace failed: %s", exc)
+
+    # --- request-scoped traces (user-request = one trace) ---
+
+    def get_or_create_trace_for_request(
+        self,
+        request_id: Optional[str],
+        query: Optional[str],
+        *,
+        name: str = "user_request",
+    ) -> tuple[Trace, bool]:
+        """Получить trace для user-request или создать если его ещё нет.
+
+        Args:
+            request_id: ouroboros `ctx.task_id` (или fallback `current_chat_id`).
+                Если None — каждый tool вызов получит новый trace
+                (старое поведение, не группируется).
+            query: первый user-query, привязанный к этому request. Передаётся
+                только при первом вызове (создание trace); последующие вызовы
+                с тем же request_id игнорируют параметр.
+            name: имя root observation если создаём новый trace.
+
+        Returns:
+            (trace, is_new) — trace объект и флаг «trace создан этим вызовом»
+            (для логирования).
+        """
+        self._cleanup_stale_traces()
+
+        if not request_id:
+            # Без request_id — каждый tool в своём trace (legacy fallback).
+            return self.start_trace(query=query, name=name), True
+
+        with self._request_traces_lock:
+            existing = self._request_traces.get(request_id)
+            if existing is not None:
+                self._request_last_seen[request_id] = time.monotonic()
+                return existing, False
+
+        # Создаём новый — query берётся из первого tool вызова.
+        trace = self.start_trace(query=query, name=name)
+        with self._request_traces_lock:
+            self._request_traces[request_id] = trace
+            self._request_last_seen[request_id] = time.monotonic()
+        logger.info(
+            "observability: opened trace for request_id=%s (trace_id=%s)",
+            request_id,
+            trace.trace_id,
+        )
+        return trace, True
+
+    def close_trace_for_request(
+        self, request_id: str, *, answer: Optional[str] = None
+    ) -> None:
+        """Закрыть trace связанный с request_id (если есть).
+
+        Используется когда внешний код (e.g., loop hook) знает что user-request
+        завершён. Если не вызвать явно — trace закроется по TTL или atexit.
+        """
+        if not request_id:
+            return
+        with self._request_traces_lock:
+            trace = self._request_traces.pop(request_id, None)
+            self._request_last_seen.pop(request_id, None)
+        if trace is not None:
+            self.end_trace(trace, answer=answer)
 
     # --- public API ---
 
