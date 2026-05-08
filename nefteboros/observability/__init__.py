@@ -108,20 +108,30 @@ def observe(
                     "observe(%s): no current trace, writing orphan span", node_name
                 )
 
-            # Compact input для span: первый аргумент — обычно GraphState.
-            input_data: Optional[dict[str, Any]] = None
+            # Полный input — первый аргумент функции узла (GraphState).
+            # Для Langfuse сериализуем целиком (оценщик увидит query, intent,
+            # forecast_results, citations и т.д. в каждом span'е).
+            # Для JSON-trace применится `_truncate` автоматически.
+            input_data: Optional[Any] = None
+            input_compact: Optional[Any] = None
             if args:
                 first = args[0]
+                input_data = first  # tracer._serialize обработает pydantic / dict
+                # Сжатый view для JSON: только имена полей state.
                 if hasattr(first, "model_dump"):
                     try:
-                        input_data = {"state_keys": list(first.model_dump().keys())}
+                        input_compact = {"state_keys": list(first.model_dump().keys())}
                     except Exception:  # noqa: BLE001
-                        input_data = None
+                        input_compact = None
                 elif isinstance(first, dict):
-                    input_data = {"state_keys": list(first.keys())}
+                    input_compact = {"state_keys": list(first.keys())}
 
             span = tracer.start_span(
-                node_name, trace=trace, input_data=input_data, as_type=as_type
+                node_name,
+                trace=trace,
+                input_data=input_data,
+                input_compact=input_compact,
+                as_type=as_type,
             )
             span_token = _current_span.set(span)
 
@@ -133,10 +143,18 @@ def observe(
             finally:
                 _current_span.reset(span_token)
 
-            output_data: Optional[dict[str, Any]] = None
+            # Полный output — partial-update от узла (dict с реальными данными:
+            # intent, forecast_results, synthesis, citations, validation_warnings).
+            output_compact: Optional[dict[str, Any]] = None
             if isinstance(result, dict):
-                output_data = {"keys": list(result.keys())}
-            tracer.end_span(span, status="ok", output_data=output_data, trace=trace)
+                output_compact = {"keys": list(result.keys())}
+            tracer.end_span(
+                span,
+                status="ok",
+                output_data=result,
+                output_compact=output_compact,
+                trace=trace,
+            )
 
             return result
 
@@ -146,7 +164,11 @@ def observe(
 
 
 def start_trace(
-    *, query: Optional[str] = None, name: str = "analyst_request"
+    *,
+    query: Optional[str] = None,
+    name: str = "analyst_request",
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Trace:
     """Открыть top-level trace для одного запроса агента.
 
@@ -156,23 +178,36 @@ def start_trace(
 
     Args:
         query: пользовательский запрос (input root observation).
-        name: имя top-level trace в Langfuse UI. По умолчанию analyst_request;
-            для rag_search / web_search tool entry — передавайте соответственно.
+        name: имя top-level trace в Langfuse UI.
+        session_id: для группировки нескольких запросов в чат-сессию (Langfuse).
+        user_id: атрибуция к пользователю (если есть).
     """
     tracer = get_tracer()
-    trace = tracer.start_trace(query=query, name=name)
+    trace = tracer.start_trace(
+        query=query, name=name, session_id=session_id, user_id=user_id
+    )
     _current_trace.set(trace)
     return trace
 
 
-def end_trace(trace: Trace, *, answer: Optional[str] = None) -> None:
+def end_trace(
+    trace: Trace,
+    *,
+    answer: Optional[str] = None,
+    answer_full: Optional[Any] = None,
+) -> None:
     """Закрыть top-level trace и flush в Langfuse + JSONL summary.
 
     Должен вызываться даже при ошибке (через try/finally), чтобы trace
     закрылся и не остался висеть в Langfuse.
+
+    Args:
+        answer: компактный preview для JSON-trace summary.
+        answer_full: полный объект для Langfuse UI (markdown / JSON-tree
+            tool-result). Если None — fallback на answer.
     """
     tracer = get_tracer()
-    tracer.end_trace(trace, answer=answer)
+    tracer.end_trace(trace, answer=answer, answer_full=answer_full)
 
 
 def _extract_request_id(ctx: Any) -> Optional[str]:
@@ -191,6 +226,19 @@ def _extract_request_id(ctx: Any) -> Optional[str]:
     if chat_id:
         return f"chat:{chat_id}"
     return None
+
+
+def _extract_session_id(ctx: Any) -> Optional[str]:
+    """`current_chat_id` из ToolContext → session_id для Langfuse.
+
+    Несколько user-requests (task_id) одного чата привязываются к одной
+    Langfuse session. В UI можно фильтровать по сессии — видеть как агент
+    отвечал на серию запросов в течение чата.
+    """
+    if ctx is None:
+        return None
+    chat_id = getattr(ctx, "current_chat_id", None)
+    return f"chat:{chat_id}" if chat_id is not None else None
 
 
 def traced_tool(
@@ -235,12 +283,16 @@ def traced_tool(
 
             tracer = get_tracer()
             request_id = _extract_request_id(ctx)
+            session_id = _extract_session_id(ctx)
 
             # Получить или открыть trace на user-request. Если ctx.task_id
             # отсутствует (legacy/CLI вызов), trace не регистрируется — мы
             # его закрываем сразу после tool вызова, иначе он висит до atexit.
             trace, is_new = tracer.get_or_create_trace_for_request(
-                request_id, query_value, name="user_request"
+                request_id,
+                query_value,
+                name="user_request",
+                session_id=session_id,
             )
             is_legacy_unregistered = is_new and not request_id
 
@@ -255,16 +307,33 @@ def traced_tool(
 
             try:
                 result = fn(*args, **kwargs)
-                output_data: Optional[dict[str, Any]] = None
+                # Полный JSON-результат tool'а (для Langfuse UI оценщика).
+                # JSON-trace получит компакт.
+                output_full: Any = None
+                output_compact: Any = None
                 if isinstance(result, str):
-                    output_data = {"answer_chars": len(result)}
+                    # Tool возвращает JSON-string — парсим для красивого UI.
+                    import json as _json
+                    try:
+                        output_full = _json.loads(result)
+                    except (_json.JSONDecodeError, ValueError):
+                        output_full = result  # plain string
+                    output_compact = {"answer_chars": len(result)}
+                else:
+                    output_full = result
                 tracer.end_span(
-                    tool_span, status="ok", output_data=output_data, trace=trace
+                    tool_span,
+                    status="ok",
+                    output_data=output_full,
+                    output_compact=output_compact,
+                    trace=trace,
                 )
                 if is_legacy_unregistered:
-                    # Legacy путь без ctx — закрываем trace сразу, иначе он
-                    # висит до atexit без summary-строки.
-                    end_trace(trace, answer=result if isinstance(result, str) else None)
+                    end_trace(
+                        trace,
+                        answer=result if isinstance(result, str) else None,
+                        answer_full=output_full,
+                    )
                 return result
             except BaseException as exc:
                 tracer.end_span(tool_span, status="error", error=exc, trace=trace)

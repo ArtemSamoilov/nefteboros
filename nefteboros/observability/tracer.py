@@ -66,7 +66,14 @@ assert TRUNCATE_THRESHOLD * 2 + 500 < _PIPE_BUF_LINUX_MACOS * 2, (
 
 @dataclasses.dataclass
 class Span:
-    """Один узел графа в трейсе. Mutable — поля заполняются по ходу выполнения."""
+    """Один узел графа в трейсе. Mutable — поля заполняются по ходу выполнения.
+
+    Разделение full / compact:
+    - `input` / `output` — compact для JSON-trace (truncated для атомарного
+      append <PIPE_BUF). Используется для self-contained debug-файла на диске.
+    - `input_full` / `output_full` — полный объект для Langfuse UI (там нет
+      ограничения на размер observation, оценщику нужны полные ответы).
+    """
 
     trace_id: str
     span_id: int
@@ -75,8 +82,10 @@ class Span:
     ts_iso: str  # человекочитаемый
     parent_span_id: Optional[int] = None
     status: str = "ok"  # ok | error | skipped
-    input: Optional[dict[str, Any]] = None
-    output: Optional[dict[str, Any]] = None
+    input: Optional[Any] = None  # compact, truncated — для JSON
+    output: Optional[Any] = None  # compact, truncated — для JSON
+    input_full: Optional[Any] = None  # full content — для Langfuse
+    output_full: Optional[Any] = None  # full content — для Langfuse
     error: Optional[dict[str, str]] = None  # {"type", "message"}
     # LLM-only поля, опциональные
     model: Optional[str] = None
@@ -95,10 +104,15 @@ class Trace:
     ts_iso: str
     query: Optional[str] = None
     answer: Optional[str] = None
+    answer_full: Optional[Any] = None  # для Langfuse UI (полный финал)
     span_count: int = 0
     status: str = "ok"
     error_node: Optional[str] = None
     total_cost_usd: float = 0.0
+    # Sessions / user attribution в Langfuse (см. ADR-0025).
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
 
 
 # =============================================================================
@@ -264,8 +278,55 @@ class _Tracer:
     # --- write ---
 
     @staticmethod
+    def _serialize(value: Any) -> Any:
+        """Превратить произвольное значение в JSON-совместимый объект.
+
+        Важно для Langfuse: SDK сериализует через json.dumps, и pydantic-объекты
+        (Intent, ForecastResult, Citation) ломают сериализацию default'ом.
+        Делаем dump через `model_dump` (pydantic v2), `_asdict` (namedtuple),
+        `__dict__` (dataclass / regular). Циклы не покрываем — domain объекты
+        в нашем графе плоские.
+        """
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        # pydantic v2 BaseModel
+        if hasattr(value, "model_dump"):
+            try:
+                return value.model_dump(mode="json")
+            except Exception:  # noqa: BLE001
+                pass
+        # pydantic v1 / namedtuple
+        if hasattr(value, "_asdict"):
+            try:
+                return _Tracer._serialize(value._asdict())
+            except Exception:  # noqa: BLE001
+                pass
+        # dataclass без model_dump
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            try:
+                return {f.name: _Tracer._serialize(getattr(value, f.name)) for f in dataclasses.fields(value)}
+            except Exception:  # noqa: BLE001
+                pass
+        # Enum
+        if hasattr(value, "value") and hasattr(value, "name") and type(value).__bases__ and any(
+            "Enum" in b.__name__ for b in type(value).__mro__
+        ):
+            return value.value
+        if isinstance(value, dict):
+            return {str(k): _Tracer._serialize(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_Tracer._serialize(v) for v in value]
+        # datetime / pathlib / прочее — через str()
+        return str(value)
+
+    @staticmethod
     def _truncate(value: Any) -> Any:
-        """Truncate string-fields в input/output до TRUNCATE_THRESHOLD bytes."""
+        """Truncate string-fields в input/output до TRUNCATE_THRESHOLD bytes.
+
+        Применяется ТОЛЬКО для JSON-trace на диске (concurrency-safe append
+        требует <PIPE_BUF). Для Langfuse используем `_serialize` без truncate —
+        UI оценщика должен видеть полный ответ агента.
+        """
         if isinstance(value, str):
             if len(value.encode("utf-8")) > TRUNCATE_THRESHOLD:
                 return {
@@ -353,6 +414,8 @@ class _Tracer:
         query: Optional[str],
         *,
         name: str = "user_request",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> tuple[Trace, bool]:
         """Получить trace для user-request или создать если его ещё нет.
 
@@ -364,6 +427,8 @@ class _Tracer:
                 только при первом вызове (создание trace); последующие вызовы
                 с тем же request_id игнорируют параметр.
             name: имя root observation если создаём новый trace.
+            session_id: chat session для группировки в Langfuse UI.
+            user_id: атрибуция к пользователю.
 
         Returns:
             (trace, is_new) — trace объект и флаг «trace создан этим вызовом»
@@ -373,7 +438,12 @@ class _Tracer:
 
         if not request_id:
             # Без request_id — каждый tool в своём trace (legacy fallback).
-            return self.start_trace(query=query, name=name), True
+            return (
+                self.start_trace(
+                    query=query, name=name, session_id=session_id, user_id=user_id
+                ),
+                True,
+            )
 
         with self._request_traces_lock:
             existing = self._request_traces.get(request_id)
@@ -382,7 +452,9 @@ class _Tracer:
                 return existing, False
 
         # Создаём новый — query берётся из первого tool вызова.
-        trace = self.start_trace(query=query, name=name)
+        trace = self.start_trace(
+            query=query, name=name, session_id=session_id, user_id=user_id
+        )
         with self._request_traces_lock:
             self._request_traces[request_id] = trace
             self._request_last_seen[request_id] = time.monotonic()
@@ -394,12 +466,20 @@ class _Tracer:
         return trace, True
 
     def close_trace_for_request(
-        self, request_id: str, *, answer: Optional[str] = None
+        self,
+        request_id: str,
+        *,
+        answer: Optional[str] = None,
+        answer_full: Optional[Any] = None,
     ) -> None:
         """Закрыть trace связанный с request_id (если есть).
 
         Используется когда внешний код (e.g., loop hook) знает что user-request
         завершён. Если не вызвать явно — trace закроется по TTL или atexit.
+
+        Args:
+            answer: компактный preview для JSON-trace.
+            answer_full: полный финал для Langfuse UI.
         """
         if not request_id:
             return
@@ -407,7 +487,7 @@ class _Tracer:
             trace = self._request_traces.pop(request_id, None)
             self._request_last_seen.pop(request_id, None)
         if trace is not None:
-            self.end_trace(trace, answer=answer)
+            self.end_trace(trace, answer=answer, answer_full=answer_full)
 
     # --- public API ---
 
@@ -416,6 +496,9 @@ class _Tracer:
         query: Optional[str] = None,
         *,
         name: str = "analyst_request",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> Trace:
         """Открыть top-level trace. Не пишет в JSONL сразу — только при end_trace.
 
@@ -445,6 +528,9 @@ class _Tracer:
             started_at=time.monotonic(),
             ts_iso=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             query=query,
+            session_id=session_id,
+            user_id=user_id,
+            metadata=metadata,
         )
         # Открываем root observation в Langfuse, привязываем к нашему trace_id.
         if self._langfuse_enabled and self._langfuse_client is not None:
@@ -453,16 +539,42 @@ class _Tracer:
                     trace_context={"trace_id": lf_trace_id},
                     name=name,
                     as_type="span",
-                    input={"query": query},
+                    input={"query": query} if query else None,
                 )
+                # Sessions / user attribution в Langfuse — проставляем
+                # через set_trace_io если доступно (4.x API).
+                try:
+                    if session_id and hasattr(root_obs, "update_trace"):
+                        root_obs.update_trace(session_id=session_id, user_id=user_id, metadata=metadata)
+                    elif self._langfuse_client and hasattr(self._langfuse_client, "update_current_trace"):
+                        # Fallback на client-level update_current_trace.
+                        pass
+                except Exception:  # noqa: BLE001 — best-effort
+                    pass
                 self._langfuse_traces[lf_trace_id] = root_obs
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Langfuse root observation start failed: %s", exc)
         return trace
 
-    def end_trace(self, trace: Trace, answer: Optional[str] = None) -> None:
-        """Записать summary-строку (kind=trace) в JSONL + закрыть Langfuse root."""
+    def end_trace(
+        self,
+        trace: Trace,
+        answer: Optional[str] = None,
+        *,
+        answer_full: Optional[Any] = None,
+    ) -> None:
+        """Записать summary-строку (kind=trace) в JSONL + закрыть Langfuse root.
+
+        Args:
+            answer: компактный preview для JSON-trace summary.
+            answer_full: полный объект для Langfuse UI (markdown-ответ агента,
+                JSON со всеми citations, etc). Если None, fallback на answer.
+        """
         trace.answer = answer
+        if answer_full is not None:
+            trace.answer_full = self._serialize(answer_full)
+        elif answer is not None:
+            trace.answer_full = answer
         total_ms = int((time.monotonic() - trace.started_at) * 1000)
 
         record = {
@@ -486,7 +598,7 @@ class _Tracer:
                 root_obs = self._langfuse_traces.pop(trace.trace_id, None)
                 if root_obs is not None:
                     root_obs.update(
-                        output={"answer": answer},
+                        output=trace.answer_full if trace.answer_full is not None else {"answer": answer},
                         metadata={
                             "total_latency_ms": total_ms,
                             "total_cost_usd": record["total_cost_usd"],
@@ -505,8 +617,9 @@ class _Tracer:
         self,
         node: str,
         trace: Trace,
-        input_data: Optional[dict[str, Any]] = None,
+        input_data: Optional[Any] = None,
         as_type: str = "span",
+        input_compact: Optional[Any] = None,
     ) -> Span:
         """Открыть span. Не пишет в JSONL — запись только при end_span.
 
@@ -514,14 +627,28 @@ class _Tracer:
             "span"       — обычный узел (rule-based, validation, retrieval).
             "generation" — LLM-вызов; в Langfuse UI отрисовывается как chat
                            message с input/output, model, tokens, cost.
+
+        Args:
+            input_data: полный объект (для Langfuse UI). Если pydantic /
+                dataclass — прогоняется через `_serialize` чтобы json.dumps
+                в SDK не упал.
+            input_compact: компактная версия для JSON-trace на диске. Если
+                None — берётся `_truncate(input_data)`.
         """
+        full_input = self._serialize(input_data) if input_data is not None else None
+        compact_input = (
+            self._truncate(input_compact)
+            if input_compact is not None
+            else (self._truncate(full_input) if full_input is not None else None)
+        )
         span = Span(
             trace_id=trace.trace_id,
             span_id=self.next_span_id(),
             node=node,
             started_at=time.monotonic(),
             ts_iso=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            input=self._truncate(input_data) if input_data else None,
+            input=compact_input,
+            input_full=full_input,
         )
         if self._langfuse_enabled and self._langfuse_client is not None:
             try:
@@ -549,7 +676,7 @@ class _Tracer:
                     lf_span = parent_lf.start_observation(
                         name=node,
                         as_type=as_type,
-                        input=input_data,
+                        input=full_input,
                     )
                 else:
                     # Top-level (нет ни parent span'а ни registered root) —
@@ -558,7 +685,7 @@ class _Tracer:
                         trace_context={"trace_id": trace.trace_id},
                         name=node,
                         as_type=as_type,
-                        input=input_data,
+                        input=full_input,
                     )
                 setattr(span, "_lf_span", lf_span)
                 setattr(span, "_lf_as_type", as_type)
@@ -571,15 +698,28 @@ class _Tracer:
         span: Span,
         *,
         status: str = "ok",
-        output_data: Optional[dict[str, Any]] = None,
+        output_data: Optional[Any] = None,
+        output_compact: Optional[Any] = None,
         error: Optional[BaseException] = None,
         trace: Optional[Trace] = None,
     ) -> None:
-        """Закрыть span: latency, статус, запись в JSONL + Langfuse."""
+        """Закрыть span: latency, статус, запись в JSONL + Langfuse.
+
+        Args:
+            output_data: полный объект — для Langfuse UI.
+            output_compact: компактная версия — для JSON-trace на диске. Если
+                None, берётся `_truncate(output_data)`.
+        """
         latency_ms = int((time.monotonic() - span.started_at) * 1000)
         span.status = status
         if output_data is not None:
-            span.output = self._truncate(output_data)
+            full = self._serialize(output_data)
+            span.output_full = full
+            span.output = (
+                self._truncate(output_compact)
+                if output_compact is not None
+                else self._truncate(full)
+            )
         if error is not None:
             msg = str(error)
             if len(msg) > 500:
@@ -640,8 +780,8 @@ class _Tracer:
                     "metadata": metadata,
                     "level": "ERROR" if status == "error" else "DEFAULT",
                 }
-                if output_data is not None:
-                    update_kwargs["output"] = output_data
+                if span.output_full is not None:
+                    update_kwargs["output"] = span.output_full
                 if span.error is not None:
                     update_kwargs["status_message"] = span.error["message"]
 
