@@ -12,15 +12,19 @@
   - asset group + derived/proxy качество — что мы реально предсказываем.
   - method — какой инструмент.
   - метрики (если приложен backtest_summary) — оценка качества модели.
+  - **scenario** (v2.1, ADR-0023) — base / bear / bull / custom; драйверы;
+    base anchor shift (transparent observation-anchored корректировка).
 
-См. ADR-0012 §«Конфигурация» / interpret.py.
+См. ADR-0012, ADR-0023.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Optional
 
 from nefteboros.forecast.registry import AssetMeta, get_asset
+from nefteboros.forecast.scenarios import AS_OF_DATE, REVIEW_AFTER_DAYS
 from nefteboros.forecast.schema import (
     AssetGroup,
     BacktestSummary,
@@ -51,31 +55,41 @@ def generate_interpretation(forecast: ForecastResult) -> str:
 
     parts: list[str] = []
 
-    # 1. Заголовок: что прогнозируется
+    # 1. Заголовок: что прогнозируется (включает scenario label)
     parts.append(_header(forecast, asset_meta))
 
-    # 2. Точка + CI
+    # 2. Сценарный блок: drivers, anchor disclosure (если применимо)
+    scenario_block = _scenario_block(forecast)
+    if scenario_block:
+        parts.append(scenario_block)
+
+    # 3. Точка + CI
     parts.append(_point_and_ci(forecast))
 
-    # 3. Метрики качества (если есть)
+    # 4. Метрики качества (если есть)
     if forecast.backtest_summary is not None:
         parts.append(_quality_block(forecast.backtest_summary))
 
-    # 4. Horizon-warning
+    # 5. Horizon-warning
     parts.append(_horizon_warning(forecast.horizon, asset_meta))
 
-    # 5. Asset-specific qualifiers (derived / univariate proxy / gas)
+    # 6. Asset-specific qualifiers (derived / univariate proxy / gas)
     qual = _asset_qualifier(asset_meta, forecast.method)
     if qual:
         parts.append(qual)
 
-    # 6. Информация о свежести данных
+    # 7. Информация о свежести данных
     if "data_last_observation" in forecast.metadata:
         parts.append(
             f"Последняя наблюдаемая цена — на {forecast.metadata['data_last_observation']}."
         )
 
-    # 7. Универсальное предупреждение про политическую волатильность
+    # 8. Snapshot freshness (ADR-0023)
+    snapshot_warn = _snapshot_freshness_warning(forecast.metadata)
+    if snapshot_warn:
+        parts.append(snapshot_warn)
+
+    # 9. Универсальное предупреждение про политическую волатильность
     parts.append(
         "⚠️ **Heavy-tail политическая волатильность.** Активы нефть/газ — "
         "страшно зависят от геополитики (war 2022, Iran 2026, OPEC+ решения, "
@@ -84,6 +98,9 @@ def generate_interpretation(forecast: ForecastResult) -> str:
         "должен формироваться **гибридно**: модель + RAG-сценарии + web-новости "
         "(см. ADR-0013)."
     )
+
+    # 10. Citation hint для агента (ADR-0023 §Q4)
+    parts.append(_citation_hint(forecast))
 
     return "\n\n".join(parts)
 
@@ -107,10 +124,130 @@ def _header(forecast: ForecastResult, meta: AssetMeta) -> str:
         ModelMethod.XGBOOST: "Gradient Boosting (sklearn GBR в PR1; XGBoost в PR3)",
         ModelMethod.ENSEMBLE: "Ensemble (среднее SARIMAX + GBR)",
     }[forecast.method]
+    scenario = forecast.metadata.get("scenario_label", "base")
+    scenario_label_human = {
+        "base": "base (текущий shock-режим)",
+        "bear": "bear (de-escalation)",
+        "bull": "bull (escalation)",
+        "custom": "custom (произвольная комбинация драйверов)",
+    }.get(scenario, scenario)
 
     return (
         f"**{asset_name}, прогноз на {horizon_text}.** "
-        f"Метод: {method_text}."
+        f"Метод: {method_text}. Сценарий: **{scenario_label_human}**."
+    )
+
+
+def _scenario_block(forecast: ForecastResult) -> Optional[str]:
+    """Сценарный блок: anchor disclosure + drivers + scenario delta.
+
+    Прозрачен про observation-anchored shift (см. ADR-0023 §Q1):
+    модель не схватывает shock; base anchored к spot; bear/bull = base + delta.
+
+    Возвращает None — если scenario_applicable=False (нет смысла рассказывать
+    про драйверы, скажем, для TTF в v2.1).
+    """
+    md = forecast.metadata
+    if not md.get("scenario_applicable", False):
+        # Asset вне applicability — отдельная нотификация ниже
+        if "scenario_applicable" in md:
+            return (
+                "ℹ️ Сценарии (bear/base/bull) для этого актива в v2.1 не применяются "
+                "(см. ADR-0023). Возвращён model output без shift-калибровки. "
+                "В v2.2+ — расширение на газ и российские акции."
+            )
+        return None
+
+    raw_target = md.get("raw_model_target_value")
+    anchor_shift = md.get("base_anchor_shift", 0.0)
+    delta_low = md.get("scenario_delta_low", 0.0)
+    delta_mid = md.get("scenario_delta_mid", 0.0)
+    delta_high = md.get("scenario_delta_high", 0.0)
+    breakdown: dict[str, Any] = md.get("scenario_driver_breakdown", {})
+    scenario_label = md.get("scenario_label", "base")
+    scenario_params: dict[str, Any] = md.get("scenario_params", {})
+
+    lines: list[str] = []
+
+    # Anchor disclosure
+    if raw_target is not None and abs(anchor_shift) > 0.5:
+        unit = _unit_label(forecast.asset)
+        lines.append(
+            f"**Базовая корректировка (observation-anchored).** Модель ансамбля "
+            f"(5y train) выдала {raw_target:.2f} {unit} на конец горизонта. "
+            f"Текущий spot отличается — применён прозрачный shift "
+            f"**{anchor_shift:+.2f} {unit}** для приведения к base scenario "
+            f"(текущее состояние рынка). Это **observation, не модель**: при "
+            f"изменении spot на ±$10 — все сценарии сдвинутся на ±$10."
+        )
+
+    # Scenario delta
+    if scenario_label != "base":
+        unit = _unit_label(forecast.asset)
+        lines.append(
+            f"**Сценарный сдвиг ({scenario_label}).** Изменение от base: "
+            f"**{delta_mid:+.2f} {unit}** (диапазон {delta_low:+.2f}..{delta_high:+.2f})."
+        )
+
+    # Driver breakdown
+    if breakdown:
+        driver_lines = []
+        for driver_name, (low, mid, high) in breakdown.items():
+            if abs(mid) < 0.5 and abs(low) < 0.5 and abs(high) < 0.5:
+                continue  # пропускаем нулевые драйверы
+            state = scenario_params.get(driver_name, "?")
+            driver_lines.append(
+                f"  • **{driver_name}** ({state}): {mid:+.1f} (диапазон {low:+.1f}..{high:+.1f})"
+            )
+        if driver_lines:
+            lines.append("**Вклад драйверов** ($/bbl):\n" + "\n".join(driver_lines))
+
+    if not lines:
+        return None
+    return "\n\n".join(lines)
+
+
+def _snapshot_freshness_warning(metadata: dict) -> Optional[str]:
+    """Warning если snapshot 2026-05-08 устарел (>14 дней до runtime).
+
+    См. ADR-0023 §«valid_through убрал».
+    """
+    as_of_str = metadata.get("scenario_as_of")
+    if not as_of_str:
+        return None
+    try:
+        as_of = date.fromisoformat(as_of_str)
+    except ValueError:
+        return None
+    today = date.today()
+    days_old = (today - as_of).days
+    if days_old <= REVIEW_AFTER_DAYS:
+        return None
+    return (
+        f"⚠️ **Snapshot устарел.** Калибровка сценариев привязана к состоянию "
+        f"рынка на {as_of_str}; runtime — {today.isoformat()} (через {days_old} "
+        f"дней). При крупных событиях с тех пор (MOU подписан/отменён, Hormuz "
+        f"reopens/closes, новый ОПЕК+ raid) — shifts могут быть некорректны. "
+        f"См. ADR-0023 §«когда обновлять snapshot»."
+    )
+
+
+def _citation_hint(forecast: ForecastResult) -> str:
+    """Citation в формате ADR-0023 §Q4 для использования агентом.
+
+    Формат: `[Forecast: <model>, scenario=<label>, CI <level>]`
+    Mandatory scenario, mandatory level. Default `80%`.
+    """
+    method_label = {
+        ModelMethod.RANDOM_WALK: "random_walk",
+        ModelMethod.SARIMAX: "sarimax",
+        ModelMethod.XGBOOST: "gbr",
+        ModelMethod.ENSEMBLE: "ensemble",
+    }[forecast.method]
+    scenario = forecast.metadata.get("scenario_label", "base")
+    return (
+        f"_Цитировать как:_ `[Forecast: {method_label}, scenario={scenario}, CI 80%]` "
+        f"(или `CI 95%` / `CI 80/95%` если оба уровня в ответе)."
     )
 
 

@@ -254,6 +254,48 @@ class ForecastRefusal(BaseModel):
     )
 
 
+# =============================================================================
+# Spread forecast (A2, ADR-0023)
+# =============================================================================
+
+
+class SpreadScenarioEntry(BaseModel):
+    """Per-scenario вход для forecast_spread.
+
+    Возвращается всегда тройкой (bear/base/bull) — creator: «один спред на все
+    сценарии — ни о чём; spread сам зависит от geopolitics, разный per scenario».
+
+    `commentary` — почему именно такой spread в этом сценарии.
+    `drivers` — какие drivers сценария влияют на spread (для diagnostic).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scenario: Literal["base", "bear", "bull", "custom"]
+    spread_value: float                     # mid в USD/bbl
+    ci_80: ConfidenceInterval
+    ci_95: ConfidenceInterval
+    commentary: str
+    drivers: list[str] = Field(default_factory=list)
+
+
+class SpreadForecastResult(BaseModel):
+    """Результат `forecast_spread(asset_a, asset_b, horizon)`.
+
+    `per_scenario` — словарь со всеми тремя preset сценариями (bear/base/bull),
+    у каждого свой spread + commentary.
+    `interpretation` — общий текст для агента.
+    """
+
+    asset_a: str
+    asset_b: str
+    horizon: Horizon
+    target_date: datetime
+    per_scenario: dict[str, SpreadScenarioEntry]
+    interpretation: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 __all__ = [
     "AssetID",
     "Horizon",
@@ -268,4 +310,6 @@ __all__ = [
     "BacktestSummary",
     "ForecastResult",
     "ForecastRefusal",
+    "SpreadScenarioEntry",
+    "SpreadForecastResult",
 ]

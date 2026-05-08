@@ -42,11 +42,16 @@ from __future__ import annotations
 
 __all__ = [
     "forecast",
+    "forecast_spread",
     "Horizon",
     "AssetID",
     "ForecastResult",
+    "SpreadForecastResult",
+    "SpreadScenarioEntry",
     "ConfidenceInterval",
     "BacktestMetrics",
+    "ScenarioParams",
+    "PRESET_SCENARIOS",
 ]
 
 
@@ -57,7 +62,17 @@ def __getattr__(name: str):
     if name == "forecast":
         from nefteboros.forecast.api import forecast as _forecast
         return _forecast
-    if name in ("Horizon", "AssetID", "ForecastResult", "ConfidenceInterval", "BacktestMetrics"):
+    if name == "forecast_spread":
+        from nefteboros.forecast.spread import forecast_spread as _forecast_spread
+        return _forecast_spread
+    if name in (
+        "Horizon", "AssetID",
+        "ForecastResult", "SpreadForecastResult", "SpreadScenarioEntry",
+        "ConfidenceInterval", "BacktestMetrics",
+    ):
         from nefteboros.forecast import schema as _schema
         return getattr(_schema, name)
+    if name in ("ScenarioParams", "PRESET_SCENARIOS"):
+        from nefteboros.forecast import scenarios as _scenarios
+        return getattr(_scenarios, name)
     raise AttributeError(f"module 'nefteboros.forecast' has no attribute {name!r}")

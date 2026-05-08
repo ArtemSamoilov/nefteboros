@@ -1,22 +1,30 @@
 """High-level forecast API: единая точка входа для агента и CLI.
 
-    forecast(asset, horizon, method=None) -> ForecastResult | ForecastRefusal
+    forecast(asset, horizon, *, scenario=None, method=None) -> ForecastResult | ForecastRefusal
 
 Логика:
   1. Валидация horizon: parse string → Horizon | Refusal | ValueError.
   2. Lookup asset в registry.
-  3. Если asset = derived (urals/espo/blend) → рекурсивно прогнозируем base
-     (Brent), применяем derived layer.
-  4. Иначе:
+  3. Парсинг scenario (None | "base"|"bear"|"bull" | ScenarioParams).
+  4. Если asset = derived (urals/espo/blend) → рекурсивно прогнозируем base
+     (Brent) **с тем же scenario**, применяем derived layer.
+  5. Иначе:
      - fetch history через подходящий fetcher (yfinance/eia/moex).
      - применяем log-transform если meta.log_transform.
      - выбираем method (явный override или per-horizon default).
      - fit → predict.
      - откатываем log-transform.
+     - **применяем post-modeling shift:** base anchor (observed_spot - raw_model)
+       + scenario delta (per Q1 ADR-0023).
      - строим interpretation.
-     - возвращаем ForecastResult.
+     - возвращаем ForecastResult с scenario metadata.
 
-См. ADR-0012 §«Горизонты прогноза» / Конфигурация.
+Сценарный режим (ADR-0023):
+  - base = current shock state, anchored to spot
+  - bear = de-escalation (Hormuz reopens, Iran partial lift)
+  - bull = escalation (Hormuz fully closed)
+
+См. ADR-0012 §«Горизонты прогноза», ADR-0023 §«Решения».
 """
 
 from __future__ import annotations
@@ -44,6 +52,18 @@ from nefteboros.forecast.models.random_walk import RandomWalkForecaster
 from nefteboros.forecast.models.sarimax import SARIMAXForecaster
 from nefteboros.forecast.models.xgboost_m import XGBoostForecaster
 from nefteboros.forecast.registry import get_asset
+from nefteboros.forecast.scenarios import (
+    AS_OF_DATE,
+    FORECAST_RANDOM_STATE,
+    BaseAnchor,
+    ScenarioDelta,
+    ScenarioParams,
+    compute_base_anchor,
+    compute_scenario_delta,
+    is_scenario_applicable,
+    parse_scenario,
+    scenario_label,
+)
 from nefteboros.forecast.schema import (
     ConfidenceInterval,
     DataSource,
@@ -80,6 +100,7 @@ def forecast(
     asset: str,
     horizon: Union[str, Horizon],
     *,
+    scenario: Optional[Union[str, ScenarioParams]] = None,
     method: Optional[Union[str, ModelMethod]] = None,
     history_years: float = 5.0,
     use_cache: bool = True,
@@ -90,18 +111,27 @@ def forecast(
         asset: один из ASSET_REGISTRY (brent, wti, urals, ...).
         horizon: "1m" / "3m" / "6m" / "12m". Поддержка "1d"/"1w" — отсутствует
                  (область дей-трейдинга). >= 18m → ForecastRefusal.
+        scenario: None | "base" | "bear" | "bull" | ScenarioParams. None == "base".
+                  В v2.1 сценарии применяются к brent/wti/urals/espo/blend; для
+                  других активов (газ, RU proxy) scenario ignored с warning.
+                  См. ADR-0023.
         method: переопределение модели. Если None — default per horizon.
         history_years: сколько лет истории брать для обучения.
         use_cache: использовать ли локальный кеш данных.
 
     Returns:
         ForecastResult с centroidом, CI 80/95, interpretation, metadata.
+        metadata содержит scenario_label, base_anchor_shift, scenario_delta_*.
         ForecastRefusal если horizon вне области точечных прогнозов.
 
     Raises:
-        ValueError: невалидный asset или horizon-формат.
+        ValueError: невалидный asset, horizon-формат или scenario name.
         RuntimeError: данные недоступны и кеш пуст.
     """
+    # 0. Reproducibility: re-seed numpy/random в начале каждого вызова
+    # (см. ADR-0023 §A3, scenarios.FORECAST_RANDOM_STATE).
+    _seed_for_reproducibility()
+
     # 1. Validate horizon
     horizon_parsed = _parse_horizon(asset, horizon)
     if isinstance(horizon_parsed, ForecastRefusal):
@@ -111,7 +141,10 @@ def forecast(
     # 2. Validate asset
     meta = get_asset(asset)
 
-    # 3. Validate method
+    # 3. Parse scenario
+    scenario_params = parse_scenario(scenario)
+
+    # 4. Validate method
     if method is None:
         chosen_method = _default_method_for(asset, h)
     else:
@@ -123,15 +156,19 @@ def forecast(
         )
 
     logger.info(
-        "forecast: asset=%s horizon=%s method=%s",
-        asset, h.value, chosen_method.value,
+        "forecast: asset=%s horizon=%s method=%s scenario=%s",
+        asset, h.value, chosen_method.value, scenario_label(scenario_params),
     )
 
-    # 4. Routing: derived vs observable
+    # 5. Routing: derived vs observable
     if meta.primary_source == DataSource.DERIVED:
-        return _forecast_derived(asset, h, chosen_method, history_years, use_cache)
+        return _forecast_derived(
+            asset, h, chosen_method, scenario_params, history_years, use_cache,
+        )
 
-    return _forecast_observable(asset, h, chosen_method, history_years, use_cache)
+    return _forecast_observable(
+        asset, h, chosen_method, scenario_params, history_years, use_cache,
+    )
 
 
 # =============================================================================
@@ -143,6 +180,7 @@ def _forecast_observable(
     asset: str,
     horizon: Horizon,
     method: ModelMethod,
+    scenario_params: ScenarioParams,
     history_years: float,
     use_cache: bool,
 ) -> ForecastResult:
@@ -176,36 +214,121 @@ def _forecast_observable(
     model = _build_model(method)
     model.fit(history_for_model)
 
-    # Predict
+    # Predict (raw — model belief без scenario shift)
     raw_points = model.predict(horizon.months, levels=(0.80, 0.95))
 
     # Inverse log-transform if used
     if use_log:
         raw_points = [_exp_point(p) for p in raw_points]
 
+    # Apply scenario shift: base anchor (observation-anchored) + scenario delta.
+    # См. ADR-0023 §Q1. Для assets вне scenario applicability — shift = 0,
+    # warning формируется в interpretation.
+    observed_spot = float(history.iloc[-1])
+    raw_target_value = raw_points[-1].value
+    anchor = compute_base_anchor(
+        raw_model_value=raw_target_value,
+        observed_spot=observed_spot,
+    )
+    if is_scenario_applicable(asset):
+        delta = compute_scenario_delta(scenario_params, asset)
+    else:
+        delta = ScenarioDelta(low=0.0, mid=0.0, high=0.0, driver_breakdown={})
+
+    shifted_points = [_apply_scenario_shift(p, anchor, delta) for p in raw_points]
+
     # Build result
     result = ForecastResult(
         asset=asset,
         horizon=horizon,
         method=method,
-        points=raw_points,
+        points=shifted_points,
         interpretation="",  # заполним ниже
         backtest_summary=None,  # заполняется бектестом отдельно (eval-скрипт)
-        metadata={
-            "primary_source": meta.primary_source.value,
-            "data_n_points": len(history),
-            "data_first_observation": str(history.index.min().date()),
-            "data_last_observation": str(history.index.max().date()),
-            "data_last_value": float(history.iloc[-1]),
-            "log_transform_applied": use_log,
-            "history_years_requested": history_years,
-        },
+        metadata=_build_metadata(
+            meta=meta,
+            history=history,
+            use_log=use_log,
+            history_years=history_years,
+            anchor=anchor,
+            delta=delta,
+            scenario_params=scenario_params,
+            scenario_applicable=is_scenario_applicable(asset),
+            raw_target_value=raw_target_value,
+        ),
     )
     # Interpretation
     result_with_text = result.model_copy(update={
         "interpretation": generate_interpretation(result),
     })
     return result_with_text
+
+
+def _apply_scenario_shift(
+    point: ForecastPoint,
+    anchor: BaseAnchor,
+    delta: ScenarioDelta,
+) -> ForecastPoint:
+    """Применить anchor + scenario delta к одной точке прогноза.
+
+    Total shift = anchor + delta. Anchor — universal (приводит model output к
+    base scenario level через observation), delta = 0 для base / non-zero для
+    bear/bull. CI расширяется на calibration uncertainty diapazона delta.
+    """
+    a = anchor.anchor_shift
+    return ForecastPoint(
+        date=point.date,
+        value=point.value + a + delta.mid,
+        ci_80=ConfidenceInterval(
+            level=0.80,
+            low=point.ci_80.low + a + delta.low,
+            high=point.ci_80.high + a + delta.high,
+        ),
+        ci_95=ConfidenceInterval(
+            level=0.95,
+            low=point.ci_95.low + a + delta.low,
+            high=point.ci_95.high + a + delta.high,
+        ),
+    )
+
+
+def _build_metadata(
+    *,
+    meta,
+    history: pd.Series,
+    use_log: bool,
+    history_years: float,
+    anchor: BaseAnchor,
+    delta: ScenarioDelta,
+    scenario_params: ScenarioParams,
+    scenario_applicable: bool,
+    raw_target_value: float,
+) -> dict:
+    """Сформировать metadata-блок для ForecastResult.
+
+    Включает базовые data-fields + scenario-блок (для diagnostic в Langfuse и
+    для interpret.py).
+    """
+    return {
+        "primary_source": meta.primary_source.value,
+        "data_n_points": len(history),
+        "data_first_observation": str(history.index.min().date()),
+        "data_last_observation": str(history.index.max().date()),
+        "data_last_value": float(history.iloc[-1]),
+        "log_transform_applied": use_log,
+        "history_years_requested": history_years,
+        # Scenario block (ADR-0023)
+        "scenario_label": scenario_label(scenario_params),
+        "scenario_params": scenario_params.model_dump(),
+        "scenario_applicable": scenario_applicable,
+        "scenario_as_of": str(AS_OF_DATE),
+        "raw_model_target_value": raw_target_value,
+        "base_anchor_shift": anchor.anchor_shift,
+        "scenario_delta_low": delta.low,
+        "scenario_delta_mid": delta.mid,
+        "scenario_delta_high": delta.high,
+        "scenario_driver_breakdown": delta.driver_breakdown,
+    }
 
 
 def _exp_point(p: ForecastPoint) -> ForecastPoint:
@@ -235,21 +358,34 @@ def _forecast_derived(
     asset: str,
     horizon: Horizon,
     method: ModelMethod,
+    scenario_params: ScenarioParams,
     history_years: float,
     use_cache: bool,
 ) -> ForecastResult:
+    """Derived assets — scenario applies через base Brent forecast.
+
+    derived_layer.py принимает ForecastResult и накладывает spread (Urals/ESPO)
+    либо комбинирует (blend). Если base Brent уже содержит scenario shift —
+    derived автоматически наследует.
+    """
     if asset == "urals":
-        brent_fc = _forecast_observable("brent", horizon, method, history_years, use_cache)
+        brent_fc = _forecast_observable(
+            "brent", horizon, method, scenario_params, history_years, use_cache,
+        )
         result = derive_urals_forecast(brent_fc)
         return _attach_interpretation(result)
 
     if asset == "espo":
-        brent_fc = _forecast_observable("brent", horizon, method, history_years, use_cache)
+        brent_fc = _forecast_observable(
+            "brent", horizon, method, scenario_params, history_years, use_cache,
+        )
         result = derive_espo_forecast(brent_fc)
         return _attach_interpretation(result)
 
     if asset == "urals_minfin_blend":
-        brent_fc = _forecast_observable("brent", horizon, method, history_years, use_cache)
+        brent_fc = _forecast_observable(
+            "brent", horizon, method, scenario_params, history_years, use_cache,
+        )
         urals_fc = derive_urals_forecast(brent_fc)
         espo_fc = derive_espo_forecast(brent_fc)
         result = derive_minfin_blend_forecast(urals_fc, espo_fc)
@@ -267,6 +403,19 @@ def _attach_interpretation(result: ForecastResult) -> ForecastResult:
 # =============================================================================
 # Internal — helpers
 # =============================================================================
+
+
+def _seed_for_reproducibility() -> None:
+    """Re-seed numpy и random для детерминированности (см. ADR-0023 §A3).
+
+    Применяется в начале forecast() и forecast_spread() — защита от 3rd-party
+    implicit-random (statsmodels SARIMAX optimizer init, scipy.optimize)
+    при последовательных вызовах в одной сессии.
+    """
+    import random as _random
+
+    np.random.seed(FORECAST_RANDOM_STATE)
+    _random.seed(FORECAST_RANDOM_STATE)
 
 
 _HORIZON_RE = re.compile(r"^(\d+)\s*([dwmy])$", re.IGNORECASE)
