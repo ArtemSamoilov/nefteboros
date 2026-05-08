@@ -80,19 +80,25 @@ Date,Open,High,Low,Close,Adj Close,Volume
 
 ## `e2e_dialogues.jsonl`
 
-Цель: оценка системы целиком (success rate, citation correctness, latency).
+Цель: оценка системы целиком (success rate, citation correctness, structure adherence, refusal rate). Используется в [scripts/eval/eval_e2e.py](../scripts/eval/eval_e2e.py).
 
-Формат:
+Формат (одна строка = один диалог):
 ```json
 {
   "id": "e2e_0001",
   "scenario_type": "rag_only",
-  "user_query": "Что говорит OPEC о квотах добычи в марте 2026?",
   "language": "ru",
+  "held_out": false,
+  "messages": [
+    {"role": "user", "content": "Что говорит OPEC о квотах добычи в марте 2026?"}
+  ],
   "expected_behavior": {
     "should_use_rag": true,
     "should_use_web": false,
     "should_call_forecast": false,
+    "expected_refusal": false,
+    "expected_keywords": ["OPEC", "кво"],
+    "expected_min_citations": 1,
     "must_cite_sources": ["OPEC MOMR"],
     "rubric": [
       "Содержит конкретные цифры из отчёта",
@@ -103,11 +109,30 @@ Date,Open,High,Low,Close,Adj Close,Volume
 }
 ```
 
-Минимум 5 сценариев из ТЗ §4.6:
-1. Ответ на основе отчёта (`scenario_type: "rag_only"`)
-2. Ответ на основе веб-поиска (`scenario_type: "web_only"`)
-3. Комбинированный ответ (`scenario_type: "rag_plus_web"`)
-4. Вызов forecast tool (`scenario_type: "forecast"`)
-5. Out-of-scope (`scenario_type: "out_of_scope"`)
+**Поля:**
 
-Плюс edge cases (3-5 штук для надёжности): неоднозначный запрос, несвежие данные, смешанные источники.
+- `scenario_type` — один из: `rag_only`, `web_only`, `rag_plus_web`, `forecast`, `out_of_scope`, `multi_tool`, `follow_up`, `unknown_with_hypothesis` (запрет на «нет данных»).
+- `held_out` — true для зафиксированного финального замера (не итерируем промпт на этих кейсах). При корпусе из 10 диалогов: 8 dev / 2 held-out.
+- `messages` — список turn'ов в формате OpenAI/Anthropic. Single-turn = один user message; для `follow_up` — два или больше.
+- `expected_behavior.expected_keywords` — substring matches в финальном ответе (case-insensitive, частичный — ловит «квоты»/«квот»/«квотами» через корень «кво»). Базовая, дешёвая проверка.
+- `expected_min_citations` — минимальное число цитат **в формате** RAG/Web/Forecast в финальном ответе. Считаются [citation парсерами](../nefteboros/citations/patterns.py), без сверки с tool outputs (e2e оценивает финальный итог, не глубину тулов — для семантической сверки см. `eval_citations.py` на `citations_gold.jsonl`).
+- `should_use_rag` / `should_use_web` / `should_call_forecast` — boolean'ы. Используются для citation tool-selection match: если `should_use_rag=true`, в ответе должна быть RAG-цитата в формате; аналогично для web/forecast.
+- `must_cite_sources` — opt'ональные substring'и в `source_title`, которые должны быть процитированы. В e2e не задействовано (overhead semantic сверки), задел для `eval_citations.py`.
+- `rubric` — текстовые критерии для optional LLM-as-judge. На deterministic baseline не используется (substring + structural только).
+
+**Состав корпуса (100 диалогов):**
+
+| Категория | Кол-во | Held-out | Примечание |
+|---|---:|---:|---|
+| `rag_only` | 16 | 2 | Полный manifest: OPEC MOMR/AR/WOO/ASB, Bruegel, Энергостратегия, Новатэк, Газпром, Лукойл, Татнефть, Роснефть, IEA Oil/Gas, EIA STEO, IEF, ИНЭИ, REPowerEU |
+| `web_only` | 10 | 2 | Spot Brent/Urals/ESPO/HH/TTF, свежие санкции, заявления Минэнерго, Китай-импорт, RU/EN |
+| `rag_plus_web` | 2 | 0 | Канон ТЗ §4.6 + WOO vs current OPEC+ |
+| `forecast` | 16 | 2 | Brent/WTI/Urals/ESPO/HH/TTF/urals_minfin_blend, горизонты 1m–12m + рефьюз на 24m, RU+EN |
+| `out_of_scope` | 14 | 2 | Погода, крипта (×2), FX (×2), юрист, оценки лиц, инвест-рек (×2), металлы, consumer, космос, тривиальный |
+| `multi_tool` | 16 | 2 | RAG+forecast, forecast+web, RAG+web, тройные, Иран-сценарий, Газпром-Китай, LNG global, Urals discount, RF добыча, AR vs MOMR |
+| `follow_up` | 8 | 2 | Двухтурные + 3-turn (драйвер→корректировка), cross-language (en→ru), method override |
+| `unknown_with_hypothesis` | 8 | 2 | Запрет на «нет данных» — Иран, ЕС-Газпром, Hormuz, Татнефть, ОПЕК-распад, НДПИ, Brent $40, Газпром-банкротство |
+| `adversarial` | 10 | 4 | «Без CI», prompt injection (×2), торговый сигнал, social eng. (×2), «нет данных», role-bend (ChatGPT/анекдоты), JSON без citations, «без истории» |
+| **Всего** | **100** | **18** | dev: 82, held-out: 18 (18%) |
+
+Канон ТЗ §4.6 — диалоги 1-5 (по одной строке на категорию).
