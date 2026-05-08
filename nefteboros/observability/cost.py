@@ -29,8 +29,16 @@ logger = logging.getLogger(__name__)
 
 # (input_per_1m_usd, cached_per_1m_usd, output_per_1m_usd)
 # Если cached_rate==input_rate — провайдер не даёт кеш-скидку.
+#
+# ⚠️ ВНИМАНИЕ: ставки приблизительные. Точные B2B-тарифы Hydra/Cloud.ru
+# и GigaChat не публикуются на open-web (https://hydragpt.ru — закрытый API
+# gateway, https://developers.sber.ru — динамический Next.js). Значения
+# взяты с усреднением известных публикаций и пересчётом через курс ~92 ₽/$.
+# Для production-cost dashboard нужно сверить с биллингом провайдера.
+# В roadmap v2.2: выгрузка в YAML config с возможностью override через env.
 COST_RATES: dict[str, tuple[float, float, float]] = {
-    # Hydra → Cloud.ru / JOI proxy. См. https://hydragpt.ru/pricing.
+    # Hydra → Cloud.ru / JOI proxy. Approximate, проверить в личном кабинете
+    # после первого месяца использования.
     "kimi-k2p6": (0.45, 0.45, 1.80),
     "kimi-k2p5": (0.30, 0.30, 1.20),
     "glm-5p1": (0.40, 0.40, 1.60),
@@ -40,14 +48,32 @@ COST_RATES: dict[str, tuple[float, float, float]] = {
     "deepseek-v3p1": (0.27, 0.07, 1.10),
     "minimax-m2p7": (0.35, 0.35, 1.40),
     "gpt-oss-120b": (0.20, 0.20, 0.80),
-    # GigaChat (Sber). Курс 92 ₽/$, тарифы B2B per 1M tokens.
-    # https://developers.sber.ru/docs/ru/gigachat/api/tariffs
+    # GigaChat (Sber) B2B tariffs. Approximate, USD/1M tokens (курс 92 ₽/$).
+    # Точные ₽-цены — у Сбера в LK B2B аккаунта. Сверить после первого
+    # месяца биллинга.
     "GigaChat": (0.22, 0.22, 0.65),
     "GigaChat-Pro": (0.65, 0.65, 1.96),
     "GigaChat-Max": (1.30, 1.30, 3.91),
     "GigaChat-Ultra": (2.61, 2.61, 7.83),
     "GigaChat-2-Max": (1.30, 1.30, 3.91),
 }
+
+
+def _strip_provider_prefix(model: str) -> str:
+    """Снять префикс провайдера от usage_model в ouroboros.
+
+    Ouroboros для openai-compatible моделей возвращает `resolved_model`
+    в `_normalize_remote_response` как `target.usage_model`, а это
+    `_qualified_model_name` — `"openai-compatible/kimi-k2p6"` (с префиксом).
+    Наши COST_RATES ключи без префикса. Снимаем последнюю часть после
+    последнего слэша; если слэша нет — возвращаем как есть.
+
+    Также поддерживаем `::` разделитель (синтаксис self::model в ouroboros).
+    """
+    for sep in ("/", "::"):
+        if sep in model:
+            return model.rsplit(sep, 1)[-1].strip()
+    return model.strip()
 
 
 def compute_cost(
@@ -59,7 +85,9 @@ def compute_cost(
     """Вернуть estimated cost в USD или None если ставка неизвестна.
 
     Args:
-        model: имя модели (resolved_model из ouroboros usage или из chat-объекта).
+        model: имя модели. Может прийти с префиксом провайдера
+            (`openai-compatible/kimi-k2p6`) или без (`kimi-k2p6`) — оба
+            варианта пробуются.
         prompt_tokens: всего prompt-токенов (включая кешированные).
         completion_tokens: completion-токенов.
         cached_tokens: подмножество prompt_tokens, попавших в кеш (с дисконтом).
@@ -71,29 +99,43 @@ def compute_cost(
     if not model:
         return None
 
-    # 1. Наши ставки (приоритет — знаем точно для нашего стека).
-    rates = COST_RATES.get(model)
-    if rates is not None:
-        input_rate, cached_rate, output_rate = rates
-        non_cached = max(prompt_tokens - cached_tokens, 0)
-        cost = (
-            (non_cached * input_rate)
-            + (cached_tokens * cached_rate)
-            + (completion_tokens * output_rate)
-        ) / 1_000_000.0
-        return round(cost, 8)
+    # 1. Наши ставки. Пробуем сначала full name (на случай если ставки заведены
+    # с префиксом), потом stripped — частый случай для ouroboros usage_model.
+    candidates = [model, _strip_provider_prefix(model)]
+    for candidate in candidates:
+        rates = COST_RATES.get(candidate)
+        if rates is not None:
+            input_rate, cached_rate, output_rate = rates
+            non_cached = max(prompt_tokens - cached_tokens, 0)
+            cost = (
+                (non_cached * input_rate)
+                + (cached_tokens * cached_rate)
+                + (completion_tokens * output_rate)
+            ) / 1_000_000.0
+            return round(cost, 8)
 
     # 2. Fallback в ouroboros.pricing для OpenRouter-style.
-    try:
-        from ouroboros.pricing import estimate_cost as _ouroboros_estimate
+    for candidate in candidates:
+        try:
+            from ouroboros.pricing import estimate_cost as _ouroboros_estimate
 
-        cost = _ouroboros_estimate(model, prompt_tokens, completion_tokens, cached_tokens, 0)
-        if cost:
-            return round(float(cost), 8)
-    except (ImportError, Exception) as exc:  # noqa: BLE001 — observability must not crash caller
-        logger.debug("ouroboros.pricing fallback failed for model=%r: %s", model, exc)
+            cost = _ouroboros_estimate(
+                candidate, prompt_tokens, completion_tokens, cached_tokens, 0
+            )
+            if cost:
+                return round(float(cost), 8)
+        except (ImportError, Exception) as exc:  # noqa: BLE001 — observability must not crash caller
+            logger.debug(
+                "ouroboros.pricing fallback failed for model=%r: %s", candidate, exc
+            )
 
-    # 3. Не знаем — честный None, не 0.
+    # 3. Не знаем — честный None, не 0. Warning на debug-уровне для диагностики.
+    logger.debug(
+        "compute_cost: model=%r не найден в COST_RATES (tried: %s) "
+        "и в ouroboros.pricing — возвращаем None",
+        model,
+        candidates,
+    )
     return None
 
 

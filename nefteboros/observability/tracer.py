@@ -576,7 +576,12 @@ def log_llm_usage(
 
     resolved_model = model or usage.get("resolved_model") or usage.get("model")
     if resolved_model:
-        span.model = str(resolved_model)
+        # Snip префикс провайдера для display (Langfuse UI показывает model
+        # отдельным полем, "openai-compatible/kimi-k2p6" нечитаемо). Полное имя
+        # сохраним в metadata через provider, а stripped — в model.
+        from nefteboros.observability.cost import _strip_provider_prefix
+
+        span.model = _strip_provider_prefix(str(resolved_model))
     resolved_provider = provider or usage.get("provider")
     if resolved_provider:
         span.provider = str(resolved_provider)
