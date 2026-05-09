@@ -1,36 +1,28 @@
-"""Observability — Langfuse трейсинг + JSONL backup для LangGraph узлов.
+"""Observability — Langfuse трейсинг для агента.
 
 См. ADR-0024 (`docs/adr/0024-observability-langfuse.md`).
 
-**Архитектура (после рефакторинга 2026-05-08):**
+**Архитектура:**
 
-- `traced_tool` / `observe` — тонкие обёртки над **встроенным** `langfuse.observe`
-  декоратором. Langfuse SDK сам управляет OTel context'ом, иерархией родитель-
-  потомок, ingest'ом content в UI. Мы добавляем поверх:
-    1. session_id / user_id из `ctx.current_chat_id` через `update_current_trace`.
-    2. JSON-trace в `metrics/runs/<ts>/trace.jsonl` (offline backup).
-    3. log_llm_usage помощник для проброса tokens/cost в текущий generation span.
-- `_Tracer` (tracer.py) — теперь **только JSONL writer + registry для группировки
-  span'ов одного user-request в JSON-trace** (Langfuse-связь полностью удалена,
-  её делает SDK).
+- `traced_tool` — декоратор для Ouroboros tool entry points в
+  `skills/*/plugin.py`. Открывает `langfuse.propagate_attributes` контекст
+  с `session_id` / `user_id` из `ctx.current_chat_id` и фиксирует
+  `trace_name="user_request"` — все 3 tool вызова одной чат-сессии в UI
+  попадают в одну Langfuse Session с одинаковым именем trace'а.
+- `observe` — декоратор для async-узлов LangGraph. Тонкая обёртка над
+  встроенным `langfuse.observe` — иерархия parent-child делается SDK
+  через OTel context propagation.
+- `log_llm_usage` — пробрасывает tokens / cost / model из usage-словаря
+  ouroboros или langchain в текущий generation-observation Langfuse через
+  `client.update_current_generation`.
 
-Использование:
+JSON-trace (`metrics/runs/<ts>/trace.jsonl`) пишется параллельно через
+`_Tracer` — это offline backup для дебага без Langfuse Cloud (см.
+`tracer.py`). Group span'ов делается **только** в Langfuse через session_id —
+JSON-trace на это не претендует.
 
-    from nefteboros.observability import observe, log_llm_usage, traced_tool
-
-    @traced_tool(name="analyst_query")
-    def _tool_analyst_query(ctx=None, *, query: str = "") -> str:
-        ...
-
-    builder.add_node("synthesize", observe(name="synthesize", as_type="generation")(synthesize))
-
-    # Внутри LLM-узла после chat-call:
-    msg, usage = await client.chat_async(...)
-    log_llm_usage(usage)
-
-Errors никогда не попадают в финальный ответ агента или UI пользователя —
-только в Python logging. Если Langfuse SDK не установлен / Cloud недоступен —
-JSON-trace продолжает писаться независимо.
+Errors не попадают в финальный ответ агента или UI пользователя — только
+в Python `logging`. Если Langfuse SDK не установлен — JSON-trace продолжает.
 """
 
 from __future__ import annotations
@@ -40,7 +32,6 @@ import inspect
 import json
 import logging
 import os
-import time
 from typing import Any, Callable, Optional, TypeVar
 
 from nefteboros.observability.tracer import (
@@ -59,22 +50,21 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 # =============================================================================
-# Lazy import Langfuse SDK
+# Lazy import langfuse SDK
 # =============================================================================
 
-
 _LF_OBSERVE: Optional[Callable[..., Any]] = None
-_LF_GET_CLIENT: Optional[Callable[[], Any]] = None
+_LF_PROPAGATE: Optional[Callable[..., Any]] = None
 _LF_AVAILABLE: Optional[bool] = None
 
 
 def _try_import_langfuse() -> bool:
-    """Попытка импорта langfuse SDK с feature-flag.
+    """Lazy import langfuse SDK с feature-flag.
 
     Кешируем результат — без повторных try/import на каждый span.
-    Если LANGFUSE_ENABLED=false — пропускаем даже импорт (быстрее CI).
+    `LANGFUSE_ENABLED=false` пропускает даже импорт (ускоряет CI / unit-тесты).
     """
-    global _LF_OBSERVE, _LF_GET_CLIENT, _LF_AVAILABLE
+    global _LF_OBSERVE, _LF_PROPAGATE, _LF_AVAILABLE
     if _LF_AVAILABLE is not None:
         return _LF_AVAILABLE
 
@@ -84,10 +74,10 @@ def _try_import_langfuse() -> bool:
         return False
 
     try:
-        from langfuse import get_client, observe
+        from langfuse import observe, propagate_attributes
 
         _LF_OBSERVE = observe
-        _LF_GET_CLIENT = get_client
+        _LF_PROPAGATE = propagate_attributes
         _LF_AVAILABLE = True
         return True
     except ImportError:
@@ -96,25 +86,24 @@ def _try_import_langfuse() -> bool:
         return False
 
 
-def _extract_request_id(ctx: Any) -> Optional[str]:
-    """task_id (приоритет) или current_chat_id из ouroboros ToolContext."""
-    if ctx is None:
-        return None
-    task_id = getattr(ctx, "task_id", None)
-    if task_id:
-        return f"task:{task_id}"
-    chat_id = getattr(ctx, "current_chat_id", None)
-    if chat_id:
-        return f"chat:{chat_id}"
-    return None
-
-
 def _extract_session_id(ctx: Any) -> Optional[str]:
-    """current_chat_id → session_id для Langfuse (группировка по чат-сессии)."""
+    """`ctx.current_chat_id` → session_id для Langfuse.
+
+    Несколько user-requests одного чата (разные `task_id`) попадают в одну
+    Langfuse Session — UI Sessions tab группирует их.
+    """
     if ctx is None:
         return None
     chat_id = getattr(ctx, "current_chat_id", None)
     return f"chat:{chat_id}" if chat_id is not None else None
+
+
+def _extract_user_id(ctx: Any) -> Optional[str]:
+    """`ctx.user_id` если есть. Сейчас в ouroboros ToolContext не предусмотрено,
+    но оставляем точку расширения. None — пропускаем."""
+    if ctx is None:
+        return None
+    return getattr(ctx, "user_id", None)
 
 
 # =============================================================================
@@ -125,20 +114,21 @@ def _extract_session_id(ctx: Any) -> Optional[str]:
 def observe(
     *, name: Optional[str] = None, as_type: str = "span"
 ) -> Callable[[F], F]:
-    """Декоратор для LangGraph узлов — тонкая обёртка над `langfuse.observe`.
+    """Декоратор для async-узлов LangGraph — обёртка над `langfuse.observe`.
 
     Применяется через wrap при `add_node` в `analyst_graph.py`, чтобы файлы
-    `nefteboros/graphs/nodes/*.py` оставались чистыми (см. ADR-0025 §«Где
+    `nefteboros/graphs/nodes/*.py` оставались доменными (см. ADR-0025 §«Где
     лежат декораторы»).
 
-    - Langfuse SDK сам управляет OTel context'ом — вложенные @observe-функции
-      автоматически становятся child observations.
-    - JSON-trace параллельно пишется через нашу обёртку (для offline debug
-      без Langfuse).
+    Поведение:
+    - Langfuse SDK сам управляет OTel context'ом: вложенные @observe
+      становятся child observations при пропагации через async/await.
+    - JSON-trace пишется через `_Tracer.start_span` / `end_span` параллельно
+      (offline backup).
 
     Args:
-        name: имя span'а в Langfuse UI (default — fn.__name__).
-        as_type: "span" / "generation" / "tool" / etc — тип observation в UI.
+        name: имя observation в Langfuse (default fn.__name__).
+        as_type: "span" / "generation" / "tool" / etc — типизация в UI.
     """
 
     def decorator(fn: F) -> F:
@@ -146,43 +136,32 @@ def observe(
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(
                 f"observe(name={node_name!r}) применён к sync-функции; "
-                "узлы LangGraph в analyst_graph должны быть async."
+                "узлы LangGraph должны быть async."
             )
 
-        # Langfuse native @observe — иерархия / OTel context / content
-        # auto-capture через SDK. JSON-trace параллельно через нашу обёртку.
         if _try_import_langfuse() and _LF_OBSERVE is not None:
             fn = _LF_OBSERVE(name=node_name, as_type=as_type)(fn)  # type: ignore[assignment]
 
         @functools.wraps(fn)
         async def wrapped(*args: Any, **kwargs: Any) -> Any:
-            # JSON-trace span (async-friendly).
             tracer = get_tracer()
             trace = _current_trace.get()
             if trace is None:
-                from nefteboros.observability.tracer import Trace as _T
-                from datetime import datetime as _dt, timezone as _tz
-                import uuid as _uuid
+                # Orphan-trace для unit-тестов / прямых вызовов узлов.
+                trace = _make_orphan_trace()
 
-                trace = _T(
-                    trace_id=f"orphan_{_uuid.uuid4().hex[:8]}",
-                    started_at=time.monotonic(),
-                    ts_iso=_dt.now(_tz.utc).isoformat(timespec="milliseconds"),
-                    query=None,
-                )
-
-            json_input = args[0] if args else None
             input_compact = None
-            if hasattr(json_input, "model_dump"):
+            input_full: Any = args[0] if args else None
+            if hasattr(input_full, "model_dump"):
                 try:
-                    input_compact = {"state_keys": list(json_input.model_dump().keys())}
+                    input_compact = {"state_keys": list(input_full.model_dump().keys())}
                 except Exception:  # noqa: BLE001
-                    input_compact = None
+                    pass
 
             span = tracer.start_span(
                 node_name,
                 trace=trace,
-                input_data=json_input,
+                input_data=input_full,
                 input_compact=input_compact,
                 as_type=as_type,
             )
@@ -195,9 +174,9 @@ def observe(
             finally:
                 _current_span.reset(span_token)
 
-            output_compact: Optional[dict[str, Any]] = None
-            if isinstance(result, dict):
-                output_compact = {"keys": list(result.keys())}
+            output_compact = (
+                {"keys": list(result.keys())} if isinstance(result, dict) else None
+            )
             tracer.end_span(
                 span,
                 status="ok",
@@ -215,20 +194,31 @@ def observe(
 def traced_tool(
     *, name: Optional[str] = None, query_arg: str = "query"
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Декоратор для Ouroboros tool entry points — wrapper над `langfuse.observe`.
+    """Декоратор для Ouroboros tool entry points.
 
-    Поведение:
-    1. **Langfuse**: @observe(as_type="tool") создаёт root span "tool_name" →
-       устанавливает trace.name через `update_current_trace(name=...)` если
-       это первый tool в task. session_id / user_id из ctx.current_chat_id.
-       OTel context propagation делает SDK автоматически — следующие @observe
-       вызовы (в т.ч. graph узлы внутри analyst_query) становятся child.
-    2. **JSON-trace**: ctx-aware registry группирует span'ы одного user-request
-       в один trace_id. Закрытие — TTL / atexit / явный `close_trace_for_request`.
+    Применяется к sync handler'ам в `skills/*/plugin.py`.
+
+    Что делает:
+
+    1. **`langfuse.propagate_attributes`**: открывает контекст с
+       `session_id=chat:N`, `user_id`, `trace_name="user_request"`. Все
+       observations созданные внутри (в т.ч. вложенные @observe графа)
+       наследуют эти trace-level атрибуты. UI Sessions tab → видим
+       все tool вызовы одного чата как одну сессию; UI Traces tab →
+       все trace'ы с именем `user_request`.
+    2. **`langfuse.observe(as_type="tool")`** оборачивает реальный handler
+       — создаёт root observation с auto-capture input/output, иерархия
+       parent-child делается SDK.
+    3. **JSON-trace** через `_Tracer` — параллельный offline backup на
+       диске (для дебага без Langfuse Cloud).
 
     Сигнатура handler'а: `def fn(ctx: Any = None, *, query: str = "")`.
-    Ouroboros вызывает `handler(ctx, **args)`; default `ctx=None` поддерживает
-    legacy `handler(**args)` fallback при TypeError.
+    Ouroboros вызывает `handler(ctx, **args)`; default `ctx=None`
+    поддерживает legacy `handler(**args)` fallback при TypeError.
+
+    Args:
+        name: имя tool span'а в Langfuse (default fn.__name__).
+        query_arg: имя kwarg с пользовательским запросом — для JSON-trace.
     """
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -237,25 +227,20 @@ def traced_tool(
         @functools.wraps(fn)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             ctx = args[0] if args else None
-            query_value: Optional[str] = None
-            v = kwargs.get(query_arg)
-            if isinstance(v, str):
-                query_value = v
-
-            # JSON-trace registry (для offline backup).
-            tracer = get_tracer()
-            request_id = _extract_request_id(ctx)
-            session_id = _extract_session_id(ctx)
-            trace, is_new = tracer.get_or_create_trace_for_request(
-                request_id, query_value, name="user_request", session_id=session_id
+            query_value: Optional[str] = (
+                kwargs.get(query_arg) if isinstance(kwargs.get(query_arg), str) else None
             )
-            is_legacy = is_new and not request_id
+            session_id = _extract_session_id(ctx)
+            user_id = _extract_user_id(ctx)
 
-            # Session attribution + JSON-trace sync делаются ниже внутри _inner
-            # (см. SDK 4.x: update_current_trace отсутствует, используется
-            # update_current_span с metadata).
-
-            # Span конкретного tool в JSON-trace (зеркало Langfuse @observe span).
+            # ---- JSON-trace span (offline backup) ----
+            tracer = get_tracer()
+            trace = tracer.start_trace(
+                query=query_value,
+                name="user_request",
+                session_id=session_id,
+                user_id=user_id,
+            )
             trace_token = _current_trace.set(trace)
             tool_span = tracer.start_span(
                 tool_name,
@@ -265,45 +250,24 @@ def traced_tool(
             )
             span_token = _current_span.set(tool_span)
 
+            # ---- Langfuse: propagate_attributes + @observe ----
+            if _try_import_langfuse() and _LF_OBSERVE is not None and _LF_PROPAGATE is not None:
+                lf_observed = _LF_OBSERVE(name=tool_name, as_type="tool")(fn)
+                propagate_kwargs: dict[str, Any] = {"trace_name": "user_request"}
+                if session_id:
+                    propagate_kwargs["session_id"] = session_id
+                if user_id:
+                    propagate_kwargs["user_id"] = user_id
+                cm = _LF_PROPAGATE(**propagate_kwargs)
+            else:
+                lf_observed = fn
+                cm = _NullContext()
+
             try:
-                # Native Langfuse @observe — иерархия / OTel context / content
-                # auto-capture. Sync JSON-trace.trace_id с Langfuse OTel ID для
-                # verify-скрипта. session_id ставится через update_current_span
-                # (4.x API; update_current_trace не существует).
-                def _inner(*a: Any, **kw: Any) -> Any:
-                    if _try_import_langfuse() and _LF_GET_CLIENT is not None:
-                        try:
-                            client = _LF_GET_CLIENT()
-                            # Sync trace_id JSON-trace ↔ Langfuse OTel.
-                            lf_tid = client.get_current_trace_id()
-                            if lf_tid and is_new:
-                                trace.trace_id = str(lf_tid)
-                            # session_id ставим в metadata КАЖДОГО tool вызова
-                            # (а не только первого) — чтобы все 3 trace'а
-                            # одной чат-сессии можно было найти filter'ом
-                            # `metadata.session_id` в UI.
-                            if session_id:
-                                try:
-                                    client.update_current_span(
-                                        metadata={
-                                            "session_id": session_id,
-                                            "request_id": request_id,
-                                        },
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    pass
-                        except Exception:  # noqa: BLE001
-                            pass
-                    return fn(*a, **kw)
+                with cm:
+                    result = lf_observed(*args, **kwargs)
 
-                if _try_import_langfuse() and _LF_OBSERVE is not None:
-                    inner_wrapped = _LF_OBSERVE(name=tool_name, as_type="tool")(_inner)
-                else:
-                    inner_wrapped = _inner
-
-                result = inner_wrapped(*args, **kwargs)
-
-                # Парсим JSON-string результат tool'а для full output.
+                # Парсим JSON-string tool result для full output.
                 output_full: Any = result
                 output_compact: Optional[dict[str, Any]] = None
                 if isinstance(result, str):
@@ -320,17 +284,15 @@ def traced_tool(
                     output_compact=output_compact,
                     trace=trace,
                 )
-                if is_legacy:
-                    end_trace(
-                        trace,
-                        answer=result if isinstance(result, str) else None,
-                        answer_full=output_full,
-                    )
+                tracer.end_trace(
+                    trace,
+                    answer=result if isinstance(result, str) else None,
+                    answer_full=output_full,
+                )
                 return result
             except BaseException as exc:
                 tracer.end_span(tool_span, status="error", error=exc, trace=trace)
-                if is_legacy:
-                    end_trace(trace, answer=None)
+                tracer.end_trace(trace, answer=None)
                 raise
             finally:
                 _current_span.reset(span_token)
@@ -341,6 +303,43 @@ def traced_tool(
     return decorator
 
 
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+class _NullContext:
+    """No-op context manager — для пути без Langfuse."""
+
+    def __enter__(self) -> "_NullContext":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+def _make_orphan_trace() -> Trace:
+    """Trace для async-узла, вызванного без обёртки `traced_tool` (unit-тесты,
+    direct invocation). JSON-trace пишет orphan span; Langfuse не
+    затрагивается (в этом контексте OTel-spanа всё равно нет)."""
+    import time as _time
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    return Trace(
+        trace_id=f"orphan_{_uuid.uuid4().hex[:8]}",
+        started_at=_time.monotonic(),
+        ts_iso=_dt.now(_tz.utc).isoformat(timespec="milliseconds"),
+        query=None,
+    )
+
+
+# =============================================================================
+# Top-level trace API (для CLI / eval скриптов)
+# =============================================================================
+
+
 def start_trace(
     *,
     query: Optional[str] = None,
@@ -348,10 +347,10 @@ def start_trace(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> Trace:
-    """Открыть top-level JSON-trace (для CLI / eval — без Ouroboros).
+    """Открыть top-level JSON-trace (CLI / eval — без Ouroboros tool dispatch).
 
-    Note: Langfuse trace будет создан автоматически при первом @observe
-    декорированном вызове внутри. Этот API только для JSON-trace.
+    Note: Langfuse trace создаётся SDK автоматически при первом @observe-
+    декорированном вызове. Эта функция только для JSON-trace.
     """
     tracer = get_tracer()
     trace = tracer.start_trace(
@@ -367,7 +366,7 @@ def end_trace(
     answer: Optional[str] = None,
     answer_full: Optional[Any] = None,
 ) -> None:
-    """Закрыть JSON-trace (Langfuse trace закрывается SDK автоматически)."""
+    """Закрыть JSON-trace. Langfuse trace закрывается SDK автоматически."""
     tracer = get_tracer()
     tracer.end_trace(trace, answer=answer, answer_full=answer_full)
 

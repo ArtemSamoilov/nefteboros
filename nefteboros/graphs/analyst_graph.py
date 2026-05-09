@@ -157,22 +157,31 @@ def build_analyst_graph() -> Any:
 
 
 async def invoke_with_trace(graph: Any, state: GraphState) -> dict[str, Any]:
-    """Open a top-level observability trace, run graph.ainvoke, close trace.
+    """Run `graph.ainvoke(state)` под open Langfuse trace + JSON-trace.
 
-    Entry-points (CLI, ouroboros tool entry `ext_18_r_neftegaz_analyst_*`,
-    telegram bot, eval скрипты) должны использовать эту обёртку вместо
-    прямого `graph.ainvoke(state)` — иначе span'ы узлов будут orphan
-    (см. ADR-0024 §«Trace lifecycle»).
+    Используется CLI / eval скриптами / Track D baseline-run (где нет
+    Ouroboros tool dispatch с ToolContext). Открывает `propagate_attributes`
+    с `trace_name="analyst_request"` — все @observe-узлы графа попадают в
+    один trace в Langfuse. JSON-trace параллельно через `start_trace` /
+    `end_trace` (см. ADR-0025 §«Trace lifecycle»).
 
-    Возврат — обычный LangGraph result (dict). Исключения пробрасываются,
-    но trace всё равно закрывается через try/finally.
+    В production через Ouroboros — `traced_tool` в plugin.py делает то же
+    самое плюс прокидывает session_id из ctx.
     """
-    trace = start_trace(query=getattr(state, "query", None))
+    query = getattr(state, "query", None)
+    trace = start_trace(query=query, name="analyst_request")
     token = _current_trace.set(trace)
+
     try:
-        result = await graph.ainvoke(state)
-        # synthesis — финальный текст ответа в GraphState; если узел упал
-        # до synthesize, поле останется None — это нормально.
+        from langfuse import propagate_attributes  # type: ignore[import-not-found]
+
+        cm = propagate_attributes(trace_name="analyst_request")
+    except ImportError:
+        cm = _NullContext()  # type: ignore[assignment]
+
+    try:
+        with cm:
+            result = await graph.ainvoke(state)
         answer = result.get("synthesis") if isinstance(result, dict) else None
         end_trace(trace, answer=answer)
         return result
@@ -181,6 +190,16 @@ async def invoke_with_trace(graph: Any, state: GraphState) -> dict[str, Any]:
         raise
     finally:
         _current_trace.reset(token)
+
+
+class _NullContext:
+    """No-op context manager — fallback при отсутствии Langfuse SDK."""
+
+    def __enter__(self) -> "_NullContext":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
 
 
 __all__ = ["build_analyst_graph", "invoke_with_trace"]
