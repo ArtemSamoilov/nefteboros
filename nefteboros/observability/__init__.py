@@ -283,21 +283,36 @@ def traced_tool(
                     tc = None
 
             try:
+                # Стэк context manager'ов для tool span:
+                #   1. remote_parent_cm(tc) — пробрасывает parent OTel span
+                #      (для child вложения в main user_request) БЕЗ AS_ROOT
+                #      флага. См. её docstring в _ouroboros_patches.py.
+                #   2. start_as_current_observation(...) — собственно tool span.
+                # При отсутствии Langfuse — оба → _NullContext.
+                lf_outer_cm: Any = _NullContext()
                 lf_span_cm: Any = _NullContext()
                 if _try_import_langfuse():
                     try:
                         from langfuse import get_client as _get_lf_client
 
+                        from nefteboros.observability._ouroboros_patches import (
+                            remote_parent_cm,
+                        )
+                        lf_outer_cm = remote_parent_cm(tc)
                         lf_span_cm = _get_lf_client().start_as_current_observation(
-                            trace_context=tc,
                             name=tool_name,
                             as_type="tool",
                             input={"query": query_value} if query_value else None,
                         )
                     except Exception:
+                        lf_outer_cm = _NullContext()
                         lf_span_cm = _NullContext()
 
-                with lf_span_cm as lf_span:
+                import contextlib as _contextlib
+
+                with _contextlib.ExitStack() as _stack:
+                    _stack.enter_context(lf_outer_cm)
+                    lf_span = _stack.enter_context(lf_span_cm)
                     result = fn(*args, **kwargs)
                     # Прокинуть полный output в lf span (если есть)
                     if lf_span is not None and hasattr(lf_span, "update"):

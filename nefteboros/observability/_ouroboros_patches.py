@@ -30,10 +30,11 @@ Ouroboros — наследие upstream-форка (см. roadmap §«Принц
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,46 @@ def get_active_trace_context() -> Optional[dict[str, str]]:
     user_request span. Возвращает None если handle_task не активен.
     """
     return _trace_context_per_pid.get(os.getpid())
+
+
+@contextlib.contextmanager
+def remote_parent_cm(tc: Optional[dict[str, str]]) -> Iterator[None]:
+    """Активирует remote parent OTel span БЕЗ AS_ROOT-флага Langfuse.
+
+    Workaround для Langfuse 4.x: `client.start_as_current_observation(
+    trace_context=tc, ...)` автоматически ставит `langfuse.internal.as_root=
+    True` на создаваемый span (см. langfuse/_client/client.py). Сервер при
+    rendering Tracing list выбирает trace.name / trace.input / trace.output
+    от **worker** span'а с AS_ROOT (web_search), вместо корневого
+    user_request — в UI колонки "Name/Input/Output" показывают tool вместо
+    финального ответа агента.
+
+    Fix: пробрасывать parent через OTel low-level `use_span(NonRecordingSpan)`
+    — иерархия parent_observation_id остаётся (web_search.parent =
+    user_request), но AS_ROOT не ставится. Сервер берёт metadata от root_span.
+
+    Если tc пустой / некорректный — yield без эффекта (span будет создан как
+    independent root в новом trace, как при handle_task off).
+    """
+    if not tc or "trace_id" not in tc or "parent_span_id" not in tc:
+        yield
+        return
+    try:
+        from opentelemetry import trace as _otel_trace_api
+        from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+
+        parent_ctx = SpanContext(
+            trace_id=int(tc["trace_id"], 16),
+            span_id=int(tc["parent_span_id"], 16),
+            is_remote=True,
+            trace_flags=TraceFlags(0x01),
+        )
+        non_rec = NonRecordingSpan(parent_ctx)
+        with _otel_trace_api.use_span(non_rec, end_on_exit=False):
+            yield
+    except Exception:
+        logger.debug("remote_parent_cm failed; span будет создан без parent context")
+        yield
 
 
 def _enabled() -> bool:
@@ -409,26 +450,26 @@ def _patch_llm_client_chat() -> None:
         try:
             client = get_client()
             messages = kwargs.get("messages") or (args[0] if args else None)
-            # trace_context = main user_request root span — span станет
-            # child этого root, а не отдельным root-trace. Если handle_task
-            # не active (e.g. standalone test) — None → создаётся root.
+            # remote_parent_cm пробрасывает parent → child вложение БЕЗ AS_ROOT
+            # на span. Иначе сервер Langfuse выбирает trace.name/input/output
+            # от worker span'ов вместо main user_request root.
             tc = _trace_context_per_pid.get(os.getpid())
             with _propagate_cm():
-                with client.start_as_current_observation(
-                    trace_context=tc,
-                    name="ouroboros_chat",
-                    as_type="generation",
-                    input=messages,
-                ) as span:
-                    result = await original_async(self, *args, **kwargs)
-                    if isinstance(result, tuple) and len(result) == 2:
-                        msg, usage = result
-                        update_kwargs = _extract_usage_kwargs(usage)
-                        if msg is not None:
-                            update_kwargs["output"] = msg
-                        if update_kwargs:
-                            span.update(**update_kwargs)
-                    return result
+                with remote_parent_cm(tc):
+                    with client.start_as_current_observation(
+                        name="ouroboros_chat",
+                        as_type="generation",
+                        input=messages,
+                    ) as span:
+                        result = await original_async(self, *args, **kwargs)
+                        if isinstance(result, tuple) and len(result) == 2:
+                            msg, usage = result
+                            update_kwargs = _extract_usage_kwargs(usage)
+                            if msg is not None:
+                                update_kwargs["output"] = msg
+                            if update_kwargs:
+                                span.update(**update_kwargs)
+                        return result
         except Exception:
             # Любая ошибка observability → fallback на raw call.
             logger.debug("chat_async observability wrap failed; using raw")
@@ -440,21 +481,21 @@ def _patch_llm_client_chat() -> None:
             messages = kwargs.get("messages") or (args[0] if args else None)
             tc = _trace_context_per_pid.get(os.getpid())
             with _propagate_cm():
-                with client.start_as_current_observation(
-                    trace_context=tc,
-                    name="ouroboros_chat",
-                    as_type="generation",
-                    input=messages,
-                ) as span:
-                    result = original_sync(self, *args, **kwargs)
-                    if isinstance(result, tuple) and len(result) == 2:
-                        msg, usage = result
-                        update_kwargs = _extract_usage_kwargs(usage)
-                        if msg is not None:
-                            update_kwargs["output"] = msg
-                        if update_kwargs:
-                            span.update(**update_kwargs)
-                    return result
+                with remote_parent_cm(tc):
+                    with client.start_as_current_observation(
+                        name="ouroboros_chat",
+                        as_type="generation",
+                        input=messages,
+                    ) as span:
+                        result = original_sync(self, *args, **kwargs)
+                        if isinstance(result, tuple) and len(result) == 2:
+                            msg, usage = result
+                            update_kwargs = _extract_usage_kwargs(usage)
+                            if msg is not None:
+                                update_kwargs["output"] = msg
+                            if update_kwargs:
+                                span.update(**update_kwargs)
+                        return result
         except Exception:
             logger.debug("chat observability wrap failed; using raw")
             return original_sync(self, *args, **kwargs)
@@ -466,4 +507,4 @@ def _patch_llm_client_chat() -> None:
     )
 
 
-__all__ = ["apply_patches", "get_active_trace_context"]
+__all__ = ["apply_patches", "get_active_trace_context", "remote_parent_cm"]
