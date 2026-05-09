@@ -331,3 +331,72 @@ def test_smoke_llm_disambiguate_unavailable_falls_back_to_synthesize(monkeypatch
     assert final["intent"].type.value == "out_of_scope"
     assert final["intent"].matched_rule == "llm_unavailable_creds"
     assert final["synthesis"]
+
+
+# =============================================================================
+# Unit tests для _build_citations — ADR tag conditional (Track A v2.1 follow-up)
+# =============================================================================
+
+
+def _make_forecast_result(method: ModelMethod) -> ForecastResult:
+    """Минимальный ForecastResult для unit-теста _build_citations."""
+    return ForecastResult(
+        asset="brent",
+        horizon=Horizon.M3,
+        method=method,
+        points=[
+            ForecastPoint(
+                date=datetime(2026, 8, 6, tzinfo=timezone.utc),
+                value=85.50,
+                ci_80=ConfidenceInterval(level=0.80, low=70.0, high=101.0),
+                ci_95=ConfidenceInterval(level=0.95, low=60.0, high=111.0),
+            ),
+        ],
+        interpretation="test",
+        backtest_summary=None,
+        metadata={},
+    )
+
+
+def test_build_citations_uses_adr_0024_for_ou_regime() -> None:
+    """OU_REGIME (Track A production method, ADR-0024) → ADR-0024 в state.Citation tag.
+
+    До этого fix'а tag всегда был ADR-0012, что для OU forecast — stale attribution.
+    См. ADR-0024 §A4 + PR #43 (D6 parser coverage) и фоллап после PR #44.
+    """
+    from nefteboros.graphs.nodes.synthesize import _build_citations
+
+    state = GraphState(
+        query="brent prognoz",
+        forecast_results=[_make_forecast_result(ModelMethod.OU_REGIME)],
+    )
+    citations = _build_citations(state)
+    assert len(citations) == 1
+    assert "ADR-0024" in citations[0].tag
+    assert "ADR-0012" not in citations[0].tag
+    assert "ou_regime" in citations[0].tag
+
+
+def test_build_citations_uses_adr_0012_for_legacy_methods() -> None:
+    """Legacy backtest методы (sarimax/ensemble/random_walk/...) → ADR-0012 (original).
+
+    Iterates по всем enum members кроме OU_REGIME — устойчиво к будущему расширению
+    ModelMethod.
+    """
+    from nefteboros.graphs.nodes.synthesize import _build_citations
+
+    legacy_methods = [m for m in ModelMethod if m != ModelMethod.OU_REGIME]
+    assert legacy_methods, "ожидаем ≥1 legacy метод в enum"
+
+    for method in legacy_methods:
+        state = GraphState(
+            query="brent prognoz",
+            forecast_results=[_make_forecast_result(method)],
+        )
+        citations = _build_citations(state)
+        assert len(citations) == 1, f"method={method.value}"
+        assert "ADR-0012" in citations[0].tag, (
+            f"legacy method={method.value} должен ссылаться на ADR-0012, "
+            f"got tag={citations[0].tag!r}"
+        )
+        assert "ADR-0024" not in citations[0].tag, f"method={method.value}"
