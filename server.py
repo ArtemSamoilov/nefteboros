@@ -32,6 +32,17 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 import uvicorn
 
+# Track F (ADR-0025): eager import активирует Langfuse monkey-patches на
+# Ouroboros agent loop ДО первого user request. Без этого импорта patches
+# применяются только при lazy-load skill `neftegaz_analyst` (при первом
+# tool вызове), и trace для chat-запросов без tool dispatch теряется
+# (см. nefteboros.observability._ouroboros_patches.apply_patches).
+# Try/except — observability никогда не должна ломать server startup.
+try:
+    import nefteboros.observability  # noqa: F401  (apply_patches at import)
+except Exception:
+    logging.getLogger(__name__).exception("nefteboros.observability load failed")
+
 from ouroboros import get_version
 from ouroboros.file_browser_api import file_browser_routes
 from ouroboros.model_catalog_api import api_model_catalog
