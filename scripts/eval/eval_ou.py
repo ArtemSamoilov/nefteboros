@@ -125,6 +125,7 @@ def walk_forward_for_asset(
     horizons_months: list[int],
     origin_step_days: int,
     history_years: float,
+    use_cache: bool = True,
 ) -> list[dict]:
     """Прогнать walk-forward для одного актива.
 
@@ -132,7 +133,7 @@ def walk_forward_for_asset(
     """
     logger.info("walk_forward asset=%s ...", asset)
     try:
-        history = fetch_history(asset, history_years)
+        history = fetch_history(asset, history_years, use_cache=use_cache)
     except Exception as e:
         logger.warning("fetch failed for %s: %s", asset, e)
         return [{"asset": asset, "error": f"fetch failed: {type(e).__name__}: {e}"}]
@@ -291,6 +292,8 @@ def main():
     )
     parser.add_argument("--quick", action="store_true",
                         help="Quick mode: brent only, 3m only.")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Force fresh fetch (bypass local cache).")
     parser.add_argument("--output-dir", default=str(ROOT / "metrics" / "runs"))
     args = parser.parse_args()
 
@@ -316,6 +319,7 @@ def main():
             continue
         records = walk_forward_for_asset(
             asset, horizons_months, args.origin_step_days, args.history_years,
+            use_cache=not args.no_cache,
         )
         all_records.extend(records)
 
@@ -361,6 +365,27 @@ def main():
             f"{row['mape_pct']:>8.2f} {row['bias_pct']:>+8.2f} "
             f"{row['coverage_80']:>6.2f}"
         )
+
+    # Per-regime breakdown — A9 (даёт картину «где модель работает, где намеренно нет»).
+    if aggr["regimes"]:
+        print()
+        print("=== Per-regime breakdown ===")
+        regime_order = [
+            "pre_2022", "russia_war_shock",
+            "cap_normalization", "iran_2026",
+        ]
+        for regime in regime_order:
+            if regime not in aggr["regimes"]:
+                continue
+            print(f"\n--- {regime.upper()} ---")
+            print(f"{'asset':12s} {'scenario':6s} {'h':>3s} {'n':>4s} {'mape%':>8s} {'cov80':>6s}")
+            for key in sorted(aggr["regimes"][regime].keys()):
+                row = aggr["regimes"][regime][key]
+                asset, scenario, hkey = key.split("__")
+                print(
+                    f"{asset:12s} {scenario:6s} {hkey:>3s} {row['n']:>4d} "
+                    f"{row['mape_pct']:>8.2f} {row['coverage_80']:>6.2f}"
+                )
 
 
 if __name__ == "__main__":
