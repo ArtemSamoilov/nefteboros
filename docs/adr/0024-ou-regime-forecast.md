@@ -305,7 +305,48 @@ DoD: 12m bull mid drop ≥ 25% от spot для всех трёх MOEX assets �
 
 Regression test зашит — если кто-то вернёт σ×spot, тест сломается с явным сообщением.
 
-## Trade-offs (consolidated, after A4-A7)
+### A8 — Bear σ recalibration после backtest review (2026-05-09)
+
+**Проблема:** A5 backtest на 5y history показал **под-coverage bear scenario на 12m**:
+- brent bear 12m: coverage 0.25 (75% realized вне 80% CI)
+- wti bear 12m: coverage 0.38
+- henry_hub bear 6m+: coverage 0.25
+- ttf bear 1m: coverage 0.50
+
+Причина: `σ_bear` калиброван как чистый «calm regime» (~22% годовых для нефти, ~35% для газа). На mixed 5y history (включая war shock 2022, COVID 2020, Hormuz 2026) realized vol часто шире — bear CI under-estimates.
+
+**Recalibration:**
+
+| Asset | σ_bear до | σ_bear после | Δ |
+|---|---:|---:|---:|
+| brent, wti | 0.20 | **0.25** | +5pp |
+| urals | 0.22 | 0.27 | +5pp |
+| espo | 0.21 | 0.26 | +5pp |
+| urals_minfin_blend | 0.22 | 0.27 | +5pp |
+| henry_hub, ttf | 0.35 | **0.45** | +10pp |
+
+**Constraint:** `σ_bear ≤ σ_base` (semantic invariant: bear=calm regime, vol ≤ shock regime). Не нарушается — для всех assets теперь `σ_bear == σ_base` (equal, not inverted).
+
+**Результаты после recalibration (backtest 2026-05-09 v2):**
+
+| Asset | Horizon | Coverage до | Coverage после |
+|---|---|---:|---:|
+| brent bear | 12m | **0.25** | **0.62** |
+| brent bear | 6m | 0.75 | 0.88 |
+| wti bear | 12m | **0.38** | **0.62** |
+| wti bear | 6m | 0.75 | 0.88 |
+| henry_hub bear | 6m | **0.25** | **0.50** |
+| henry_hub bear | 12m | 0.25 | 0.38 |
+| ttf bear | 1m | 0.50 | **0.88** |
+
+MAPE не изменился (bear σ влияет только на CI ширину, не на mid). Forecast table widths: bear CI +25-29% wider on long horizons (что и нужно для better coverage).
+
+**Принятые как known limitation (не fix'нуто):**
+
+- **NVTK bear 3m coverage 0.14** — связано со структурным rally NVTK 2020-2024 (Yamal LNG commissioning); bear params calibrated к oil/gas commodity dynamics, не к equity growth episodes. Mitigation: known limitation в отчёте §4.5; v2.2 — отдельная calibration для equity growth regimes.
+- **TTF base bias −29.6%** — TTF 5y average был выше base μ=43 из-за 2022 war shock (€200-300 пиковые). Design choice: base μ anchored к **current spot/equilibrium** (2026-05-08), не к 5y historical average. Это intentional — 2022 spike не репрезентативен для current shock regime.
+
+## Trade-offs (consolidated, after A4-A8)
 
 **Преимущества:**
 - Actionable CI: width ±10-19% для нефти, ±25-50% для газа, bounded на длинных horizons
