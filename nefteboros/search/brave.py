@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from nefteboros.observability._observe import observe
 from nefteboros.search.lang import brave_params_for_lang, detect_lang
 from nefteboros.search.models import SearchHit
 from nefteboros.search.tiers import classify, normalize_hostname
@@ -70,6 +71,7 @@ class BraveClient:
     def has_key(self) -> bool:
         return bool(self._api_key)
 
+    @observe(name="brave_api_call", as_type="retriever")
     def search(
         self,
         query: str,
@@ -77,6 +79,7 @@ class BraveClient:
         freshness: str = "pw",
         lang: str | None = None,
     ) -> list[SearchHit]:
+        """HTTP-вызов Brave Search API. Виден в Langfuse как `retriever`."""
         if not self._api_key:
             raise BraveAuthError(
                 "BRAVE_API_KEY not set. Get key at brave.com/search/api/."

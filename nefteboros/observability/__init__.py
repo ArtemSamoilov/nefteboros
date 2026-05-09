@@ -46,6 +46,21 @@ from nefteboros.observability.tracer import (
 logger = logging.getLogger(__name__)
 
 
+# Apply monkey-patches на ouroboros для интеграции agent loop с Langfuse:
+# - `handle_task` оборачивается в `propagate_attributes` с session_id/trace_name.
+# - `LLMClient.chat_async` / `chat` оборачиваются в @observe(generation) +
+#   log_llm_usage. Это даёт видимость синтеза финального ответа Ouroboros'ом
+#   в Langfuse trace для всех 3 типов tool (rag/web/analyst).
+# Patch применяется один раз при первом импорте этого модуля. Защита от
+# double-patch через флаг. Skip при LANGFUSE_ENABLED=false.
+try:
+    from nefteboros.observability._ouroboros_patches import apply_patches
+
+    apply_patches()
+except Exception as _exc:  # noqa: BLE001
+    logger.debug("ouroboros patches not applied: %s", _exc)
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 

@@ -17,6 +17,7 @@ import os
 import threading
 from dataclasses import dataclass
 
+from nefteboros.observability._observe import observe
 from nefteboros.rag.embedder import Embedder
 from nefteboros.rag.query_classifier import QueryClassifier, topic_overlap_score
 from nefteboros.rag.schema import TopicTags
@@ -84,9 +85,11 @@ class Reranker:
                 cls._instance = cls(model_name)
             return cls._instance
 
+    @observe(name="rerank", as_type="retriever")
     def rerank(
         self, query: str, candidates: list[SearchHit], top_k: int
     ) -> list[RankedHit]:
+        """Cross-encoder reranking. Виден в Langfuse как `retriever`."""
         if not candidates:
             return []
         pairs = [(query, c.text) for c in candidates]

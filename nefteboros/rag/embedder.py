@@ -14,6 +14,8 @@ import os
 import threading
 from typing import Iterable
 
+from nefteboros.observability._observe import observe
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.environ.get("NEFTEBOROS_EMBED_MODEL", "BAAI/bge-m3")
@@ -80,6 +82,7 @@ class Embedder:
         )
         return embeddings.tolist()
 
+    @observe(name="embed_query", as_type="embedding")
     def embed_query(self, text: str, *, normalize: bool = True) -> list[float]:
-        """Эмбеддит один запрос."""
+        """Эмбеддит один запрос. Виден в Langfuse как `embedding` observation."""
         return self.embed([text], normalize=normalize)[0]
