@@ -180,24 +180,32 @@ ASSET_PARAMS: dict[str, dict[ScenarioName, OUParams]] = {
     },
 
     # ----- Российский нефтегаз proxy (INVERTED bull — escalation hurts equity) -----
-    # source: Q1 2022 GAZP −50% YTD при Brent +50% — Russia-specific factors
-    # (sanctions, RUB outflow) доминируют над commodity tailwind.
-    # Inflation 10%/y — RUB equity nominal: CBR rate 16-18% + страновая премия;
-    # частично включает рост цен фон.
+    # source: Q1 2022 GAZP nominal 330→132 RUB (-60%) за 3 мес, потом slow recovery
+    # к 165 (Aug 2022). Russia-specific factors (sanctions, RUB outflow, foreign
+    # capital exit) доминируют над commodity tailwind.
+    #
+    # Inflation scenario-specific (A6 recalibration, ADR-0024 §«Trade-offs» №4):
+    # - bear/base: 10%/y — CBR rate + страновая премия в стандартном режиме
+    # - bull: 3%/y — RUB девальвируется в hard currency на escalation;
+    #   equity nominal не получает CPI lift (FX dynamic доминирует)
+    # μ_bull откалиброван к -25..-40% от spot для match 2022 panic depth.
     "moexog": {
         "bear": OUParams(mu_0=7200.0, theta=2.0, sigma=0.18, inflation=0.10),
         "base": OUParams(mu_0=6700.0, theta=1.5, sigma=0.22, inflation=0.10),
-        "bull": OUParams(mu_0=5500.0, theta=1.0, sigma=0.30, inflation=0.10),
+        # bull: μ -33% от spot (-26% effective at 12m)
+        "bull": OUParams(mu_0=3800.0, theta=1.0, sigma=0.32, inflation=0.03),
     },
     "gazp": {
         "bear": OUParams(mu_0=130.0, theta=2.0, sigma=0.20, inflation=0.10),
         "base": OUParams(mu_0=117.0, theta=1.5, sigma=0.25, inflation=0.10),
-        "bull": OUParams(mu_0=85.0,  theta=1.0, sigma=0.35, inflation=0.10),
+        # bull: μ -49% от spot (-29% effective at 12m), match 2022 panic
+        "bull": OUParams(mu_0=60.0,  theta=1.0, sigma=0.40, inflation=0.03),
     },
     "nvtk": {
         "bear": OUParams(mu_0=1280.0, theta=2.0, sigma=0.22, inflation=0.10),
         "base": OUParams(mu_0=1124.0, theta=1.5, sigma=0.27, inflation=0.10),
-        "bull": OUParams(mu_0=820.0,  theta=1.0, sigma=0.40, inflation=0.10),
+        # bull: μ -47% от spot (-28% effective at 12m)
+        "bull": OUParams(mu_0=600.0,  theta=1.0, sigma=0.45, inflation=0.03),
     },
 }
 
@@ -247,8 +255,15 @@ def compute_ou_forecast(
     mu_t = params.mu_0 * (1 + params.inflation * t)
     mid = mu_t + (spot - params.mu_0) * math.exp(-params.theta * t)
 
-    # Variance bounded: σ²/(2θ) × (1 - exp(-2θt))
-    sigma_dollar = params.sigma * spot
+    # Variance bounded: σ²/(2θ) × (1 - exp(-2θt)).
+    # ADR-0024 §A7: sigma_dollar = σ × mid (не σ × spot). Это академически
+    # корректнее когда mid дрейфует далеко от spot (bear/bull на длинных
+    # horizons). Sensitivity test в tests/test_ou_sigma_anchor.py показал что
+    # на extreme bear (spot=$100, μ=$70, 12m) разница в ширине CI ~30% между
+    # σ×spot vs σ×mid; на base (mid≈spot) разница <2%.
+    # mid in OU не зависит от σ (deterministic от θ, μ_0, S_0), потому formula
+    # не recursive.
+    sigma_dollar = params.sigma * abs(mid)
     var = (sigma_dollar ** 2 / (2 * params.theta)) * (1 - math.exp(-2 * params.theta * t))
     sd = math.sqrt(var)
 
