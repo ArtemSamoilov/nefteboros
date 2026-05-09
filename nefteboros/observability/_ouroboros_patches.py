@@ -44,10 +44,58 @@ def _enabled() -> bool:
     return flag not in ("false", "0", "no", "")
 
 
-def _patch_handle_task() -> None:
-    """Обернуть `OuroborosAgent.handle_task` в propagate_attributes."""
+def _patch_openai_module() -> None:
+    """Подменить `openai.AsyncOpenAI` / `openai.OpenAI` на langfuse drop-in.
+
+    `langfuse.openai.AsyncOpenAI` — instrumented версия которая автоматически
+    создаёт `generation` observation для каждого `.chat.completions.create()`
+    вызова. Capture'ит model, input messages, output content, usage tokens,
+    cost. Работает на уровне HTTP-клиента (не как @observe декоратор) —
+    не ломает OTel context propagation для async-узлов.
+
+    Подмена в `sys.modules['openai']` применяется ДО того как ouroboros
+    лениво импортирует `from openai import AsyncOpenAI` внутри
+    `LLMClient._get_async_remote_client`. Все последующие импорты получат
+    langfuse-wrapped версию.
+
+    Это покрывает синтез финального ответа Ouroboros'ом для rag_search/
+    web_search/analyst_query — каждый LLM-вызов попадает в Langfuse trace
+    через активный `propagate_attributes` контекст из handle_task.
+
+    Замечание: GigaChat через `langchain-gigachat` использует свой HTTP
+    клиент, не openai SDK — покрытие не распространяется на него
+    (llm_disambiguate). Кандидат на отдельный instrumentor.
+    """
     try:
-        from langfuse import propagate_attributes
+        import openai
+
+        from langfuse.openai import AsyncOpenAI, OpenAI
+
+        openai.AsyncOpenAI = AsyncOpenAI  # type: ignore[misc]
+        openai.OpenAI = OpenAI  # type: ignore[misc]
+        logger.info(
+            "ouroboros: openai.AsyncOpenAI / OpenAI replaced with langfuse-wrapped versions"
+        )
+    except ImportError as exc:
+        logger.debug("openai instrumentor patch skipped: %s", exc)
+
+
+def _patch_handle_task() -> None:
+    """Обернуть `OuroborosAgent.handle_task` в root observation +
+    propagate_attributes.
+
+    Без активного OTel-span'а `propagate_attributes` устанавливает atributes
+    на КАЖДЫЙ новый trace отдельно — каждый openai-call (тысячи в одном
+    user-request: list_tools / enable_tools / run_shell / synthesize / …)
+    становится своим trace с теми же session_id и trace_name, но разными
+    trace_ids. UI Sessions tab показывает кашу из десятков trace'ов.
+
+    Решение: открыть ЯВНЫЙ root observation `user_request` через
+    `start_as_current_observation(...)` ДО `propagate_attributes`. Все
+    последующие openai-calls станут child этого root в одном trace.
+    """
+    try:
+        from langfuse import get_client, propagate_attributes
 
         from ouroboros.agent import OuroborosAgent
     except ImportError as exc:
@@ -62,33 +110,39 @@ def _patch_handle_task() -> None:
         task_type = str(task.get("type") or "")
         task_text = str(task.get("text") or "")
 
-        kwargs: dict[str, Any] = {"trace_name": "user_request"}
+        propagate_kwargs: dict[str, Any] = {"trace_name": "user_request"}
         if chat_id:
-            kwargs["session_id"] = f"chat:{chat_id}"
+            propagate_kwargs["session_id"] = f"chat:{chat_id}"
         metadata: dict[str, Any] = {}
         if task_id:
             metadata["task_id"] = task_id
         if task_type:
             metadata["task_type"] = task_type
         if metadata:
-            kwargs["metadata"] = metadata
-        if task_text:
-            # Tags не подходят (≤200 chars total), input_query попадает
-            # в trace через первый LLM-call message[0].content. Здесь —
-            # ничего дополнительного.
-            pass
+            propagate_kwargs["metadata"] = metadata
 
         try:
-            with propagate_attributes(**kwargs):
-                return original(self, task)
+            client = get_client()
+            # Явный root span — без него каждый openai-call ходит в свой
+            # trace, не группируется. С ним все child observations попадают
+            # в один trace с собственно session_id и trace_name.
+            with client.start_as_current_observation(
+                name="user_request",
+                as_type="agent",
+                input={"query": task_text} if task_text else None,
+            ):
+                with propagate_attributes(**propagate_kwargs):
+                    return original(self, task)
         except Exception:
-            # Любая ошибка в propagate_attributes (network, OTel context) —
-            # graceful: вызываем без observability.
-            logger.exception("propagate_attributes wrapper failed; running task without obs")
+            logger.exception(
+                "handle_task observability wrapper failed; running without obs"
+            )
             return original(self, task)
 
     OuroborosAgent.handle_task = patched  # type: ignore[method-assign]
-    logger.info("ouroboros: OuroborosAgent.handle_task wrapped с propagate_attributes")
+    logger.info(
+        "ouroboros: handle_task wrapped (root user_request + propagate_attributes)"
+    )
 
 
 def _patch_llm_client() -> None:
@@ -155,15 +209,8 @@ def apply_patches() -> None:
         return
 
     try:
+        _patch_openai_module()
         _patch_handle_task()
-        # LLMClient patch отключён: оборачивание chat_async через @observe
-        # ломало OTel context propagation для async graph узлов (analyst_query
-        # терял synthesize/validate_citations spans). Plan Y v2: использовать
-        # `langfuse.openai` instrumentor вместо @observe wrap на chat_async —
-        # отложено до следующего PR (см. ADR-0025 §«Known limitations» после
-        # обновления). Пока: handle_task propagate_attributes даёт session_id
-        # / trace_name на agent loop, LLM-вызовы внутри получают auto-trace
-        # только если они идут через декорированные узлы графа.
     except Exception as exc:  # noqa: BLE001
         logger.warning("ouroboros patches failed: %s", exc)
     _PATCHED = True
