@@ -265,22 +265,52 @@ def traced_tool(
             )
             span_token = _current_span.set(tool_span)
 
-            # ---- Langfuse: propagate_attributes + @observe ----
-            if _try_import_langfuse() and _LF_OBSERVE is not None and _LF_PROPAGATE is not None:
-                lf_observed = _LF_OBSERVE(name=tool_name, as_type="tool")(fn)
-                propagate_kwargs: dict[str, Any] = {"trace_name": "user_request"}
-                if session_id:
-                    propagate_kwargs["session_id"] = session_id
-                if user_id:
-                    propagate_kwargs["user_id"] = user_id
-                cm = _LF_PROPAGATE(**propagate_kwargs)
-            else:
-                lf_observed = fn
-                cm = _NullContext()
+            # ---- Langfuse: child span main user_request через trace_context ----
+            # Старый путь @observe + propagate_attributes создавал независимый
+            # root-trace на каждый tool dispatch (видно в Tracing list как
+            # повторяющийся "user_request" с input=ToolContext). Перешли на
+            # explicit trace_context от main handle_task root span — все tool
+            # spans становятся child этого root, в Tracing list — один main
+            # trace с полной иерархией.
+            tc: Optional[dict[str, str]] = None
+            if _try_import_langfuse():
+                try:
+                    from nefteboros.observability._ouroboros_patches import (
+                        get_active_trace_context,
+                    )
+                    tc = get_active_trace_context()
+                except Exception:
+                    tc = None
 
             try:
-                with cm:
-                    result = lf_observed(*args, **kwargs)
+                lf_span_cm: Any = _NullContext()
+                if _try_import_langfuse():
+                    try:
+                        from langfuse import get_client as _get_lf_client
+
+                        lf_span_cm = _get_lf_client().start_as_current_observation(
+                            trace_context=tc,
+                            name=tool_name,
+                            as_type="tool",
+                            input={"query": query_value} if query_value else None,
+                        )
+                    except Exception:
+                        lf_span_cm = _NullContext()
+
+                with lf_span_cm as lf_span:
+                    result = fn(*args, **kwargs)
+                    # Прокинуть полный output в lf span (если есть)
+                    if lf_span is not None and hasattr(lf_span, "update"):
+                        try:
+                            output_full_preview: Any = result
+                            if isinstance(result, str):
+                                try:
+                                    output_full_preview = json.loads(result)
+                                except (json.JSONDecodeError, ValueError):
+                                    output_full_preview = result[:500]
+                            lf_span.update(output=output_full_preview)
+                        except Exception:
+                            pass
 
                 # Парсим JSON-string tool result для full output.
                 output_full: Any = result

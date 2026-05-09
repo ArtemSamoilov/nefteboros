@@ -55,9 +55,25 @@ _current_user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar
 # PID-based fallback для случаев когда ContextVar не propagated (ThreadPoolExecutor,
 # Ouroboros тулы вызывают safety supervisor в worker thread без context inheritance).
 # Один Ouroboros worker process обрабатывает один task за раз, поэтому per-PID
-# session_id корректен для всех threads этого worker'а на время handle_task.
+# state корректен для всех threads этого worker'а на время handle_task.
 _session_per_pid: dict[int, str] = {}
 _user_per_pid: dict[int, str] = {}
+
+# TraceContext root span для cross-thread parent-child nesting. Все spans от
+# safety supervisor / tool dispatch в worker threads подключаются как child
+# к этому root, а не создают отдельные root traces. Без этого UI показывал
+# многократно "user_request" как отдельные traces для одного chat-запроса.
+_trace_context_per_pid: dict[int, dict[str, str]] = {}
+
+
+def get_active_trace_context() -> Optional[dict[str, str]]:
+    """Достать TraceContext текущего worker process для cross-thread propagation.
+
+    Используется traced_tool / patched chat в worker threads (где OTel
+    ContextVars потеряны), чтобы повесить их span'ы как child main
+    user_request span. Возвращает None если handle_task не активен.
+    """
+    return _trace_context_per_pid.get(os.getpid())
 
 
 def _enabled() -> bool:
@@ -185,6 +201,22 @@ def _patch_handle_task() -> None:
                 as_type="agent",
                 input={"query": task_text} if task_text else None,
             ) as root_span:
+                # Trace-level input: явно задаём текст вопроса как input
+                # самого trace (не observation). Без этого Langfuse автоматически
+                # подбирает input от первого child observation (LLM messages —
+                # засоряет UI Tracing list "Input" column).
+                if task_text:
+                    try:
+                        root_span.update_trace(input={"query": task_text})
+                    except Exception:
+                        pass
+                # Сохранить TraceContext для cross-thread propagation: все
+                # safety / tool dispatch spans подключатся как child этого root,
+                # а не создадут отдельные user_request traces.
+                _trace_context_per_pid[pid] = {
+                    "trace_id": root_span.trace_id,
+                    "parent_span_id": root_span.id,
+                }
                 with propagate_attributes(**propagate_kwargs):
                     result = original(self, task)
                 # Записать финальный ответ в output root span'а — Langfuse
@@ -201,6 +233,11 @@ def _patch_handle_task() -> None:
                         root_span.update(output=output_payload)
                     except Exception:  # noqa: BLE001
                         pass
+                    # Trace-level output (UI Tracing list "Output" column).
+                    try:
+                        root_span.update_trace(output=output_payload)
+                    except Exception:
+                        pass
                 return result
         except Exception:
             logger.exception(
@@ -215,6 +252,7 @@ def _patch_handle_task() -> None:
                 pass
             _session_per_pid.pop(pid, None)
             _user_per_pid.pop(pid, None)
+            _trace_context_per_pid.pop(pid, None)
 
     OuroborosAgent.handle_task = patched  # type: ignore[method-assign]
     logger.info(
@@ -371,10 +409,13 @@ def _patch_llm_client_chat() -> None:
         try:
             client = get_client()
             messages = kwargs.get("messages") or (args[0] if args else None)
-            # propagate_attributes гарантирует session_id на trace-level даже
-            # если active OTel span потерян (subprocess/threading boundary).
+            # trace_context = main user_request root span — span станет
+            # child этого root, а не отдельным root-trace. Если handle_task
+            # не active (e.g. standalone test) — None → создаётся root.
+            tc = _trace_context_per_pid.get(os.getpid())
             with _propagate_cm():
                 with client.start_as_current_observation(
+                    trace_context=tc,
                     name="ouroboros_chat",
                     as_type="generation",
                     input=messages,
@@ -397,8 +438,10 @@ def _patch_llm_client_chat() -> None:
         try:
             client = get_client()
             messages = kwargs.get("messages") or (args[0] if args else None)
+            tc = _trace_context_per_pid.get(os.getpid())
             with _propagate_cm():
                 with client.start_as_current_observation(
+                    trace_context=tc,
                     name="ouroboros_chat",
                     as_type="generation",
                     input=messages,
@@ -423,4 +466,4 @@ def _patch_llm_client_chat() -> None:
     )
 
 
-__all__ = ["apply_patches"]
+__all__ = ["apply_patches", "get_active_trace_context"]
