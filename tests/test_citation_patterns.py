@@ -343,6 +343,36 @@ class TestForecastPattern:
         assert len(cites) == 1
         assert cites[0].scenario is None
 
+    def test_multiple_scenarios_in_one_response(self) -> None:
+        """Regression: несколько forecast-цитат с разными scenarios в одном
+        ответе агента (типичный сценарный диалог). Каждая должна парситься
+        со своим scenario field."""
+        text = (
+            "При базовом сценарии центр $98 [Forecast: ou_regime, scenario=base, CI 80%], "
+            "при де-эскалации $70 [Forecast: ou_regime, scenario=bear, CI 80%], "
+            "при эскалации $145 [Forecast: ou_regime, scenario=bull, CI 80%]."
+        )
+        cites = list(parse_forecast_citations(text))
+        assert len(cites) == 3
+        scenarios = [c.scenario for c in cites]
+        assert scenarios == ["base", "bear", "bull"]
+        # Все три ссылаются на одну и ту же model
+        assert all(c.model == "ou_regime" for c in cites)
+        assert all(c.ci == "80%" for c in cites)
+
+    def test_no_spaces_around_scenario(self) -> None:
+        """Regression: edge case без пробелов вокруг запятых внутри citation.
+        LLM иногда выдаёт более компактный формат — pattern должен это
+        выдерживать."""
+        # Минимально пробелов: только обязательный после `Forecast:`
+        text = "[Forecast: ou_regime,scenario=base,CI 80%]"
+        cites = list(parse_forecast_citations(text))
+        assert len(cites) == 1
+        c = cites[0]
+        assert c.model == "ou_regime"
+        assert c.scenario == "base"
+        assert c.ci == "80%"
+
 
 # =============================================================================
 # Integral precision/recall на realistic корпусе
