@@ -59,10 +59,23 @@ def _short(value, n=300):
 
 
 def _smoke() -> str:
-    """Прогон 3 tool вызовов под одним FakeCtx. Возвращает session_id."""
+    """Прогон 3 user-request'ов под одной session.
+
+    Имитирует Ouroboros agent loop: каждый user-request это отдельный task,
+    и в task происходит:
+      1. Tool dispatch (rag_search / web_search / analyst_query).
+      2. Финальный синтез агента из tool result через LLMClient.chat_async.
+
+    На проде это всё делает `OuroborosAgent.handle_task` (наш patch
+    оборачивает в root span). Здесь имитируем явно через
+    `start_as_current_observation` + `propagate_attributes`.
+    """
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="nefteboros_verify_"))
     os.environ["OBSERVABILITY_RUN_DIR"] = str(tmp)
 
+    import asyncio
+
+    from langfuse import get_client, propagate_attributes
     from skills.neftegaz_analyst.plugin import (
         _tool_analyst_query,
         _tool_rag_search,
@@ -70,32 +83,79 @@ def _smoke() -> str:
     )
 
     ts = int(time.time())
-    ctx = FakeCtx(
-        task_id=f"verify_{ts}",
-        current_chat_id=f"verify_chat_{ts}",
-        user_id="artem-verify",
-    )
-    print(f"[verify] task_id={ctx.task_id} chat={ctx.current_chat_id}")
+    sid = f"chat:verify_chat_{ts}"
+    user_id = "artem-verify"
+    print(f"[verify] session_id={sid}")
 
-    print("[verify] tool: rag_search …")
-    _tool_rag_search(ctx, query="OPEC квоты добычи нефти 2026", k=3)
+    lf = get_client()
 
-    print("[verify] tool: web_search …")
-    _tool_web_search(ctx, query="brent oil price today", k=3)
+    async def _agent_synthesize_after_tool(tool_result_json: str, query: str) -> None:
+        """Имитирует синтез финального ответа Ouroboros'ом после tool вернул
+        данные. Через `LLMClient.chat_async` (patched наш wrap → ouroboros_chat
+        generation в trace)."""
+        try:
+            from ouroboros.llm import LLMClient
 
-    print("[verify] tool: analyst_query …")
-    _tool_analyst_query(ctx, query="прогноз brent на 3 месяца")
+            client = LLMClient()
+            messages = [
+                {
+                    "role": "system",
+                    "content": "Ты аналитик нефтегазового рынка. Кратко синтезируй ответ.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Запрос: {query}\n\nДанные tool: {tool_result_json[:2000]}",
+                },
+            ]
+            await client.chat_async(
+                messages=messages,
+                model="openai-compatible::kimi-k2p6",
+                max_tokens=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [synthesize] failed: {type(exc).__name__}: {exc}")
 
-    try:
-        from langfuse import get_client
+    def _user_request(task_label: str, tool_call):
+        """Один user-request: root user_request span + propagate + tool +
+        synthesize. Имитирует Ouroboros handle_task."""
+        ctx = FakeCtx(
+            task_id=f"verify_{ts}_{task_label}",
+            current_chat_id=f"verify_chat_{ts}",
+            user_id=user_id,
+        )
+        print(f"\n[verify] user-request: {task_label}")
+        with lf.start_as_current_observation(
+            name="user_request",
+            as_type="agent",
+            input={"task": task_label},
+        ):
+            with propagate_attributes(
+                session_id=sid, user_id=user_id, trace_name="user_request"
+            ):
+                tool_result, query = tool_call(ctx)
+                # Имитируем синтез ответа агентом
+                asyncio.run(_agent_synthesize_after_tool(tool_result, query))
 
-        get_client().flush()
-        print("[verify] flush ok, waiting 15s for ingestion…")
-        time.sleep(15)
-    except ImportError:
-        print("[verify] langfuse SDK не установлен — JSON-trace only")
+    def _call_rag(ctx):
+        q = "OPEC квоты добычи нефти 2026"
+        return _tool_rag_search(ctx, query=q, k=3), q
 
-    return f"chat:{ctx.current_chat_id}"
+    def _call_web(ctx):
+        q = "brent oil price today"
+        return _tool_web_search(ctx, query=q, k=3), q
+
+    def _call_analyst(ctx):
+        q = "прогноз brent на 3 месяца"
+        return _tool_analyst_query(ctx, query=q), q
+
+    _user_request("rag", _call_rag)
+    _user_request("web", _call_web)
+    _user_request("analyst", _call_analyst)
+
+    lf.flush()
+    print("\n[verify] flush ok, waiting 15s for ingestion…")
+    time.sleep(15)
+    return sid
 
 
 def _print_trace(client, t) -> None:

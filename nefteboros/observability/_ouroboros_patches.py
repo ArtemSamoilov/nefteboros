@@ -209,7 +209,11 @@ def apply_patches() -> None:
         return
 
     try:
-        _patch_openai_module()
+        # Manual wrap LLMClient.chat_async / chat — основной путь.
+        # `_patch_openai_module()` (langfuse.openai instrumentor через
+        # sys.modules) ОТКЛЮЧЁН — он создавал дубликат span ("ouroboros_chat"
+        # + "OpenAI-generation") на один LLM-вызов. Manual wrap покрывает
+        # всё что нужно с правильным именем / структурой.
         _patch_handle_task()
         _patch_llm_client_chat()
     except Exception as exc:  # noqa: BLE001
