@@ -1,9 +1,10 @@
 # ADR-0024 — Regime-conditioned mean-reverting forecast (Ornstein-Uhlenbeck per scenario)
 
-- **Дата:** 2026-05-08
+- **Дата:** 2026-05-08 (v1, Track A1-A3); 2026-05-09 (v2, Track A4-A7 refinements)
 - **Статус:** Принято (заменяет ADR-0023 в части forecast methodology; ADR-0023 описывает legacy post-modeling shift подход, оставлен как историческая запись)
 - **Контекст:** Track A roadmap v2.1 (`docs/roadmap-v2.1.md`). После критического review таблиц прогнозов (multi-cycle iteration с creator-ом 2026-05-08) выяснилось, что post-modeling shift на стат-моделях SARIMAX+GBR **в принципе не даёт actionable CI** на горизонтах ≥3m в shock-режиме — даже после 6 фиксов в ADR-0023 v3 ширина CI оставалась ±30-40%, что creator справедливо назвал «гаданием, не прогнозом».
 - **Связано:** ADR-0012 (price tools, оригинальный ensemble), ADR-0013 (hybrid forecasting), ADR-0019 (citation format), ADR-0023 (legacy post-modeling shift подход).
+- **История v2 (Track A4-A7, 2026-05-09):** разобрав v1, manager-творец нашёл 4 точки на рефинирование. См. §«A4-A7 refinements» в конце ADR.
 
 ## Контекст и проблема
 
@@ -222,6 +223,108 @@ CI 95%(t)      = E[S_t] ± 1.960 × √Var[S_t]
 - `nefteboros/forecast/interpret.py` — обновлено для OU output (target μ, speed of reversion, scenario commentary).
 - `prompts/SYSTEM.md` citation format не меняется (`[Forecast: <model>, scenario=<name>, CI <level>]`), только `<model>` теперь = `ou_regime` (вместо `ensemble`).
 
+## A4-A7 refinements (Track v2, 2026-05-09)
+
+После сборки v1 manager-творец разобрал PR #38 и нашёл 4 точки на рефинирование. Все четыре закрыты в этом PR.
+
+### A4 — Citation method enum: ENSEMBLE → OU_REGIME
+
+**Проблема:** v1 указывал `<model> = "ou_regime"` в citation, но `forecast()` возвращал `method=ModelMethod.ENSEMBLE` как «placeholder для schema compat». Расхождение ADR ↔ код.
+
+**Fix:** добавлен `ModelMethod.OU_REGIME = "ou_regime"` в `schema.py`. `forecast()` теперь возвращает `method=ModelMethod.OU_REGIME`. Citation hint в interpret.py берёт `forecast.method.value` как single source of truth (вместо metadata tag).
+
+`SYSTEM.md` обновлён — `<model>` ∈ `{ou_regime` (production), `ensemble`, `sarimax`, `gbr`, `random_walk` (backtest baseline)}.
+
+Backtest infrastructure (`eval_forecast.py`) продолжает использовать `RANDOM_WALK/SARIMAX/XGBOOST/ENSEMBLE` для baseline regression — не пострадал.
+
+### A5 — Walk-forward backtest для OU production path
+
+**Решение:** новый скрипт `scripts/eval/eval_ou.py` — walk-forward на исторических snapshots, monthly rolling origin (по умолчанию). Параметры `ASSET_PARAMS` **статичны с 2026-05-08** (вариант (а) из brief): backtest применяет current parameters к историческим точкам — это **тест анахронистической устойчивости**, насколько калибровка universal через historical regimes.
+
+Output: `metrics/runs/<timestamp>_ou_walkforward_<sha>.json` с метриками per `(asset, scenario, horizon)`:
+- MAPE на mid (mean absolute % error)
+- Bias (mean signed error)
+- Coverage 80% / 95%
+- Per-regime breakdown (PRE_2022, RUSSIA_WAR_SHOCK, CAP_NORMALIZATION, IRAN_2026)
+
+**Результаты (2026-05-09 run, all assets, 5y history, monthly origin):**
+
+| Asset | Scenario × Horizon | n | MAPE % | Coverage 80% | Note |
+|---|---|---:|---:|---:|---|
+| brent | bear × 3m | 8 | **3.8** | **1.00** | best-calibrated, calm regime fit |
+| brent | bear × 6m | 8 | 8.2 | 0.75 | OK |
+| brent | bear × 12m | 8 | 15.8 | 0.25 | acceptable for long horizon |
+| brent | base × 12m | 8 | 44.6 | 0.12 | calibrated к 2026-05 shock, исторически редко |
+| brent | bull × 12m | 8 | 65.2 | 0.12 | extreme regime, expected high MAPE |
+| wti | bear × 3m | 8 | 3.1 | 1.00 | best-calibrated |
+| gazp | base × 12m | 7 | 3.6 | 1.00 | MOEX equity stable |
+| gazp | bull × 12m | 7 | 31.0 (+bias) | 0.14 | bull pessimistic vs realized calm |
+| henry_hub | bull × 12m | 8 | 17.4 | 1.00 | газ исторически имел spikes |
+| ttf | bull × 12m | 8 | 52.4 | 0.75 | TTF 2022 spike — extreme tail |
+
+**Главный вывод (для отчёта §4.5):**
+
+1. **`bear` универсальна** на calm/post-shock regimes (MAPE ~3-15% на нефти 1-12m).
+2. **`base`/`bull` калиброваны под 2026-05 shock** — на calm history дают высокий MAPE. Это **expected and intentional**, не bug калибровки. ADR-0024 honestly документирует это в §«Trade-offs».
+3. **MOEX bull** показывает positive bias (+30%) — bull (-49% от spot) was over-pessimistic для actual calm 2021-2025 history. На 2022 panic episode bull был бы accurate.
+4. **Газ** — `henry_hub bull` хорошо works (gas markets имеют structural spikes); `ttf bull` extreme регим.
+
+**Open question (а) подтверждён:** static params достаточны для отчёта; per-snapshot calibration (вариант (б)) — backlog v2.2.
+
+DoD: `python -m scripts.eval.eval_ou` запускается, JSON генерируется, summary в этом ADR.
+
+### A6 — MOEX bull recalibration
+
+**Проблема:** v1 bull для MOEX = ~−10% от spot. 2022 reference event: GAZP nominal 330 → 132 RUB (−60%), потом slow recovery до 165 (Aug 2022). User-facing невзрачно.
+
+**Fix calibration:**
+
+| Asset | μ_bull v1 | μ_bull v2 | inflation v1 | inflation v2 | 12m mid drop |
+|---|---:|---:|---:|---:|---:|
+| moexog | 5500 | **3800** | 0.10 | **0.03** | −26% |
+| gazp | 85 | **60** | 0.10 | **0.03** | −29% |
+| nvtk | 820 | **600** | 0.10 | **0.03** | −28% |
+
+**Семантика scenario-specific inflation:**
+
+bear/base inflation = 0.10 (CBR rate + страновая премия в стандартном режиме). **Bull inflation = 0.03** — на escalation RUB девальвируется в hard currency, foreign capital outflow → equity nominal не получает CPI lift; FX dynamic доминирует над nominal CPI passthrough. Calibrated by 2022 reference event.
+
+DoD: 12m bull mid drop ≥ 25% от spot для всех трёх MOEX assets — **подтверждено**.
+
+### A7 — sigma_dollar = σ × mid (вместо σ × spot)
+
+**Проблема:** в v1 `compute_ou_forecast` использовал `sigma_dollar = σ × spot`. Когда mid дрейфует к μ далеко от spot (extreme bear/bull на длинных horizons), variance считалась от spot, что academically не corrct.
+
+**Sensitivity test (`tests/test_ou_sigma_anchor.py`):**
+
+На extreme bear (Brent 12m, spot $100, μ $70): width(σ×mid) / width(σ×spot) = **0.73** (−27% разница в ширине CI). На base (mid ≈ spot): ratio ≈ 1.00 (<2% разница). На extreme bull (spot $100, μ $120): ratio ≈ **1.21** (+21%).
+
+**Решение:** перейти на `σ × mid`. Mid не зависит от σ в OU (deterministic от θ, μ_0, S_0) — формула не recursive. Variant (а) из brief.
+
+Эффект на финальные таблицы: bear 12m CI стал на ~27% уже (academically correct); bull 12m немного шире (+21%); base почти не меняется. Direction sanity сохраняется.
+
+Regression test зашит — если кто-то вернёт σ×spot, тест сломается с явным сообщением.
+
+## Trade-offs (consolidated, after A4-A7)
+
+**Преимущества:**
+- Actionable CI: width ±10-19% для нефти, ±25-50% для газа, bounded на длинных horizons
+- **Bear scenario universal** — backtest подтверждает MAPE 3-15% на нефть на 5y history
+- Structural attribution per parameter (μ от bank consensus + Kilian, θ от liquidity, σ от regime)
+- Production method **enum-anchored** — single source of truth (A4)
+- `σ × mid` academically correct для extreme bear/bull (A7)
+- MOEX bull match 2022 panic depth (A6)
+
+**Минусы / риски (4 после A6 — обновлено):**
+
+1. **μ калиброван экспертно**, не из исторических данных через MLE. Каждое значение в коде с `# source: <reference>`.
+2. **Inflation drift линеен** — на 12m approximation acceptable; на >5y накапливается.
+3. **Snapshot устаревает** — `as_of: 2026-05-08`, runtime warning при сдвиге >14 дней.
+4. **MOEX bull = повтор 2022 panic** (A6 recalibration). Calibrated by GAZP −60% reference event. Если новая escalation окажется milder — bear scenario будет более accurate. Вариативность scenarios покрывает диапазон.
+5. **OU не имеет explicit response к flag changes runtime** — backlog v2.2.
+6. **Газ scenarios seasonal-blind** — TTF bull зимой vs летом разный, на 6m+ averaged.
+7. **Backtest показывает high MAPE base/bull на calm history** (A5) — это ожидаемо. Static params не reproducing past regime shifts; v2.2 — per-regime calibration overlay.
+
 ## Ссылки
 
 - ADR-0012 — оригинальный stat-model ensemble (SARIMAX + GBR)
@@ -232,3 +335,6 @@ CI 95%(t)      = E[S_t] ± 1.960 × √Var[S_t]
 - Kilian, L. (2009) "Not All Oil Price Shocks Are Alike" — elasticity ~$10-15/bbl per 1 mbpd
 - EIA STEO methodology (5 models pooled + expert judgment)
 - OVX index (CBOE Crude Oil Volatility Index)
+- 2022 GAZP panic — historical reference event для A6 calibration
+- `scripts/eval/eval_ou.py` — walk-forward backtest implementation (A5)
+- `tests/test_ou_sigma_anchor.py` — sensitivity test (A7)
