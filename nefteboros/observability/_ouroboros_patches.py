@@ -66,6 +66,14 @@ _user_per_pid: dict[int, str] = {}
 # многократно "user_request" как отдельные traces для одного chat-запроса.
 _trace_context_per_pid: dict[int, dict[str, str]] = {}
 
+# Последний финальный ответ агента (text от run_llm_loop). Patched
+# `ouroboros.agent.run_llm_loop` сохраняет сюда text перед возвратом, и
+# patched handle_task берёт оттуда для root_span.update(output=text). Без
+# этого root_span получал fallback `{'events_count': N}` от
+# `_extract_final_answer` — список pending_events не содержит plain
+# assistant-текста (он передаётся через emit_progress / event_queue к UI).
+_last_text_per_pid: dict[int, str] = {}
+
 
 def get_active_trace_context() -> Optional[dict[str, str]]:
     """Достать TraceContext текущего worker process для cross-thread propagation.
@@ -183,6 +191,42 @@ def _extract_final_answer(events: Any) -> Any:
     return {"events_count": len(events)}
 
 
+def _patch_run_llm_loop() -> None:
+    """Перехватить `run_llm_loop` для извлечения финального text-ответа.
+
+    `OuroborosAgent.handle_task` зовёт `run_llm_loop(...)` и получает
+    `(text, usage, llm_trace)`. После этого text идёт в `emit_task_results`
+    → event_queue → WS клиенту, но В RETURN VALUE handle_task НЕ попадает
+    (возвращается только `self._pending_events`). Поэтому fallback
+    `_extract_final_answer` на _pending_events возвращал
+    `{"events_count": N}` — UI Tracing list "Output" column показывал
+    мусор вместо реального ответа.
+
+    Patched версия сохраняет text per-PID; patched handle_task потом
+    читает его и кладёт в root_span.update(output=...).
+    """
+    try:
+        import ouroboros.agent as agent_mod
+        original = agent_mod.run_llm_loop
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("run_llm_loop patch skipped: %s", exc)
+        return
+
+    def patched(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        try:
+            if isinstance(result, tuple) and len(result) >= 1:
+                text = result[0]
+                if isinstance(text, str) and text.strip():
+                    _last_text_per_pid[os.getpid()] = text
+        except Exception:
+            pass
+        return result
+
+    agent_mod.run_llm_loop = patched  # type: ignore[attr-defined]
+    logger.info("ouroboros: run_llm_loop wrapped (capture final text для trace.output)")
+
+
 def _patch_handle_task() -> None:
     """Обернуть `OuroborosAgent.handle_task` в root observation +
     propagate_attributes.
@@ -242,15 +286,6 @@ def _patch_handle_task() -> None:
                 as_type="agent",
                 input={"query": task_text} if task_text else None,
             ) as root_span:
-                # Trace-level input: явно задаём текст вопроса как input
-                # самого trace (не observation). Без этого Langfuse автоматически
-                # подбирает input от первого child observation (LLM messages —
-                # засоряет UI Tracing list "Input" column).
-                if task_text:
-                    try:
-                        root_span.update_trace(input={"query": task_text})
-                    except Exception:
-                        pass
                 # Сохранить TraceContext для cross-thread propagation: все
                 # safety / tool dispatch spans подключатся как child этого root,
                 # а не создадут отдельные user_request traces.
@@ -258,27 +293,36 @@ def _patch_handle_task() -> None:
                     "trace_id": root_span.trace_id,
                     "parent_span_id": root_span.id,
                 }
+                # Сбросить буфер last_text для этого pid — на случай если от
+                # предыдущей задачи осталась запись (process reuse).
+                _last_text_per_pid.pop(pid, None)
+
                 with propagate_attributes(**propagate_kwargs):
                     result = original(self, task)
-                # Записать финальный ответ в output root span'а — Langfuse
-                # автонаследует в trace-level (Tracing/Traces tab → колонка
-                # Output). `set_trace_io` deprecated в 4.x.
-                final_answer = _extract_final_answer(result)
-                if final_answer is not None:
+
+                # Финальный ответ агента: 1) text от run_llm_loop (через
+                # patched _patch_run_llm_loop, см. выше), 2) fallback на
+                # _extract_final_answer от pending_events. Записываем в
+                # root_span.update(output=...) — Langfuse выводит в
+                # trace.output автоматически (через AS_ROOT root span).
+                # `update_trace` / `set_trace_io` НЕ вызываем — в Langfuse
+                # 4.x первого нет, второй deprecated; нам достаточно
+                # observation_output на root span'е (см. ADR/подтверждено
+                # в d0882be NonRecordingSpan fix).
+                final_text = _last_text_per_pid.pop(pid, None)
+                if final_text:
+                    output_payload: Any = {"answer": final_text}
+                else:
+                    fallback = _extract_final_answer(result)
                     output_payload = (
-                        {"answer": final_answer}
-                        if not isinstance(final_answer, dict)
-                        else final_answer
+                        fallback
+                        if isinstance(fallback, dict)
+                        else {"answer": fallback}
                     )
-                    try:
-                        root_span.update(output=output_payload)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    # Trace-level output (UI Tracing list "Output" column).
-                    try:
-                        root_span.update_trace(output=output_payload)
-                    except Exception:
-                        pass
+                try:
+                    root_span.update(output=output_payload)
+                except Exception:  # noqa: BLE001
+                    pass
                 return result
         except Exception:
             logger.exception(
@@ -370,6 +414,7 @@ def apply_patches() -> None:
         # sys.modules) ОТКЛЮЧЁН — он создавал дубликат span ("ouroboros_chat"
         # + "OpenAI-generation") на один LLM-вызов. Manual wrap покрывает
         # всё что нужно с правильным именем / структурой.
+        _patch_run_llm_loop()
         _patch_handle_task()
         _patch_llm_client_chat()
     except Exception as exc:  # noqa: BLE001
@@ -430,20 +475,49 @@ def _patch_llm_client_chat() -> None:
         if not isinstance(usage, dict):
             return kwargs
         model = usage.get("resolved_model") or usage.get("model")
+        resolved: Optional[str] = None
         if model:
             # Strip провайдер-префикс ("openai-compatible/kimi-k2p6" → "kimi-k2p6")
             from nefteboros.observability.cost import _strip_provider_prefix
 
-            kwargs["model"] = _strip_provider_prefix(str(model))
+            resolved = _strip_provider_prefix(str(model))
+            kwargs["model"] = resolved
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
         usage_details: dict[str, int] = {}
-        if usage.get("prompt_tokens") is not None:
-            usage_details["input"] = int(usage["prompt_tokens"])
-        if usage.get("completion_tokens") is not None:
-            usage_details["output"] = int(usage["completion_tokens"])
+        if prompt_tokens is not None:
+            usage_details["input"] = int(prompt_tokens)
+        if completion_tokens is not None:
+            usage_details["output"] = int(completion_tokens)
         if usage_details:
             kwargs["usage_details"] = usage_details
-        if usage.get("cost") is not None:
-            kwargs["cost_details"] = {"total": float(usage["cost"])}
+
+        # Cost: либо pre-calculated в `usage["cost"]` (если LLMClient проставил),
+        # либо вычисляем локально через nefteboros.observability.cost — иначе
+        # Langfuse Cloud не знает наших нестандартных моделей (kimi-k2p6, glm-5,
+        # GigaChat-2-Max) и оставляет cost=0. Зеркалит логику log_llm_usage в
+        # nefteboros.observability.tracer.
+        cost = usage.get("cost")
+        if (
+            cost is None
+            and resolved
+            and prompt_tokens is not None
+            and completion_tokens is not None
+        ):
+            try:
+                from nefteboros.observability.cost import compute_cost
+
+                cached = int(usage.get("cached_tokens") or 0)
+                cost = compute_cost(
+                    resolved,
+                    int(prompt_tokens),
+                    int(completion_tokens),
+                    cached,
+                )
+            except Exception:  # noqa: BLE001
+                cost = None
+        if cost is not None:
+            kwargs["cost_details"] = {"total": float(cost)}
         return kwargs
 
     async def patched_async(self: Any, *args: Any, **kwargs: Any) -> Any:
