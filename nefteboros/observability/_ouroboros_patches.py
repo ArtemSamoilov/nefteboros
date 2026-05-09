@@ -211,9 +211,111 @@ def apply_patches() -> None:
     try:
         _patch_openai_module()
         _patch_handle_task()
+        _patch_llm_client_chat()
     except Exception as exc:  # noqa: BLE001
         logger.warning("ouroboros patches failed: %s", exc)
     _PATCHED = True
+
+
+def _patch_llm_client_chat() -> None:
+    """Manual span wrap для `LLMClient.chat_async` / `LLMClient.chat`.
+
+    `langfuse.openai` instrumentor (через sys.modules patch) зависит от
+    import order: если ouroboros.llm импортировал openai ДО нашего patch,
+    то локальная ссылка `AsyncOpenAI` в namespace ouroboros.llm уже привязана
+    к старому классу. Production может load openai раньше observability.
+
+    Решение: обернуть `LLMClient.chat_async` / `chat` напрямую через
+    `client.start_as_current_observation(...)` как context manager. Это
+    надёжнее чем @observe декоратор (раньше ломал async OTel context для
+    graph узлов) и не зависит от import order.
+
+    Обёртка: открыть generation span до original вызова, после вернуть
+    результат и обновить span с model / usage_details / cost_details из
+    второго элемента tuple `(msg, usage)`.
+    """
+    try:
+        from langfuse import get_client
+
+        from ouroboros.llm import LLMClient
+    except ImportError as exc:
+        logger.debug("LLMClient chat patch skipped: %s", exc)
+        return
+
+    original_async = LLMClient.chat_async
+    original_sync = LLMClient.chat
+
+    def _extract_usage_kwargs(usage: Any) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if not isinstance(usage, dict):
+            return kwargs
+        model = usage.get("resolved_model") or usage.get("model")
+        if model:
+            # Strip провайдер-префикс ("openai-compatible/kimi-k2p6" → "kimi-k2p6")
+            from nefteboros.observability.cost import _strip_provider_prefix
+
+            kwargs["model"] = _strip_provider_prefix(str(model))
+        usage_details: dict[str, int] = {}
+        if usage.get("prompt_tokens") is not None:
+            usage_details["input"] = int(usage["prompt_tokens"])
+        if usage.get("completion_tokens") is not None:
+            usage_details["output"] = int(usage["completion_tokens"])
+        if usage_details:
+            kwargs["usage_details"] = usage_details
+        if usage.get("cost") is not None:
+            kwargs["cost_details"] = {"total": float(usage["cost"])}
+        return kwargs
+
+    async def patched_async(self: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            client = get_client()
+            messages = kwargs.get("messages") or (args[0] if args else None)
+            with client.start_as_current_observation(
+                name="ouroboros_chat",
+                as_type="generation",
+                input=messages,
+            ) as span:
+                result = await original_async(self, *args, **kwargs)
+                if isinstance(result, tuple) and len(result) == 2:
+                    msg, usage = result
+                    update_kwargs = _extract_usage_kwargs(usage)
+                    if msg is not None:
+                        update_kwargs["output"] = msg
+                    if update_kwargs:
+                        span.update(**update_kwargs)
+                return result
+        except Exception:
+            # Любая ошибка observability → fallback на raw call.
+            logger.debug("chat_async observability wrap failed; using raw")
+            return await original_async(self, *args, **kwargs)
+
+    def patched_sync(self: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            client = get_client()
+            messages = kwargs.get("messages") or (args[0] if args else None)
+            with client.start_as_current_observation(
+                name="ouroboros_chat",
+                as_type="generation",
+                input=messages,
+            ) as span:
+                result = original_sync(self, *args, **kwargs)
+                if isinstance(result, tuple) and len(result) == 2:
+                    msg, usage = result
+                    update_kwargs = _extract_usage_kwargs(usage)
+                    if msg is not None:
+                        update_kwargs["output"] = msg
+                    if update_kwargs:
+                        span.update(**update_kwargs)
+                return result
+        except Exception:
+            logger.debug("chat observability wrap failed; using raw")
+            return original_sync(self, *args, **kwargs)
+
+    LLMClient.chat_async = patched_async  # type: ignore[method-assign]
+    LLMClient.chat = patched_sync  # type: ignore[method-assign]
+    logger.info(
+        "ouroboros: LLMClient.chat_async / chat wrapped (manual span, OTel-safe)"
+    )
 
 
 __all__ = ["apply_patches"]
