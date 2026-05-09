@@ -4,10 +4,19 @@
 #   web   — nefteboros server (Ouroboros + neftegaz_analyst skill)
 #
 # Volumes:
-#   nefteboros_data — DATA_DIR (state, logs, observability traces)
+#   /app/data — DATA_DIR (state, logs, observability traces).
+#   По умолчанию named volume `nefteboros_data` (dev). На проде задаём
+#   `NEFTEBOROS_HOST_DATA=/root/nefteboros/data` чтобы bind-mount-ить
+#   существующий native drive с state/skills/vectorstore/logs.
 #
 # Запуск (из корня репо):
-#   docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+#   # Dev (named volume, fresh state):
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+#   # Prod (bind mount существующего drive):
+#   NEFTEBOROS_HOST_DATA=/root/nefteboros/data \
+#       docker compose -f deploy/docker-compose.yml up -d --build
+#
 #   docker compose -f deploy/docker-compose.yml logs -f web
 #   docker compose -f deploy/docker-compose.yml down
 
@@ -29,7 +38,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - nefteboros_data:/app/data
+      # Compose интерпретирует строку с `/` как bind mount, иначе как named
+      # volume. Default `nefteboros_data` (named). Override на проде:
+      #   NEFTEBOROS_HOST_DATA=/root/nefteboros/data
+      - ${NEFTEBOROS_HOST_DATA:-nefteboros_data}:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
