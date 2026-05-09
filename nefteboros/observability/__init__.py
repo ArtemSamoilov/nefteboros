@@ -1,6 +1,6 @@
 """Observability — Langfuse трейсинг для агента.
 
-См. ADR-0024 (`docs/adr/0024-observability-langfuse.md`).
+См. ADR-0025 (`docs/adr/0025-observability-langfuse.md`).
 
 **Архитектура:**
 

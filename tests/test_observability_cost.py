@@ -4,7 +4,7 @@
 `usage["resolved_model"] = "openai-compatible/kimi-k2p6"` (с префиксом),
 наши COST_RATES ключи без префикса. compute_cost должен снимать префикс.
 
-См. ADR-0024 §«Cost calculation» и багфикс PR #37.
+См. ADR-0025 §«Cost calculation» и багфикс PR #37.
 """
 
 from __future__ import annotations

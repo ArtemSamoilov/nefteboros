@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-# Защита от случайной отправки тестовых трейсов в Langfuse Cloud (см. ADR-0024).
+# Защита от случайной отправки тестовых трейсов в Langfuse Cloud (см. ADR-0025).
 # Если у разработчика в .env LANGFUSE_ENABLED=true и валидные ключи, тесты
 # инвокающие узлы analyst_graph иначе залили бы junk в production-проект.
 # Принудительно отключаем перед инициализацией tracer-singleton.

@@ -31,7 +31,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 # E2E observability — каждый tool вызов открывает top-level trace в Langfuse
-# (см. ADR-0024). Узлы LangGraph subgraph внутри analyst_query прицепятся
+# (см. ADR-0025). Узлы LangGraph subgraph внутри analyst_query прицепятся
 # к этому trace через contextvars. Импорт lazy-friendly: модуль observability
 # зависит только от stdlib + опционально от langfuse SDK.
 from nefteboros.observability import traced_tool

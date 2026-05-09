@@ -1,7 +1,7 @@
 """Analyst LangGraph subgraph — wiring узлов в StateGraph.
 
 См. ADR-0014 (minimal-graph baseline) + ADR-0015 (hybrid LLM disambiguate)
-+ ADR-0024 (observability — `@observe` через wrap при `add_node`).
++ ADR-0025 (observability — `@observe` через wrap при `add_node`).
 
 Граф:
     classify_intent (rule-based)
@@ -108,7 +108,7 @@ def build_analyst_graph() -> Any:
     """
     builder: StateGraph = StateGraph(GraphState)
 
-    # Каждый узел оборачивается `observe(name=...)` для трейсинга. См. ADR-0024.
+    # Каждый узел оборачивается `observe(name=...)` для трейсинга. См. ADR-0025.
     # Wrap делается здесь, в builder'е, чтобы файлы `nodes/*.py` оставались
     # без декораторов (separation of concerns: nodes — domain логика,
     # graph — wiring + observability).
