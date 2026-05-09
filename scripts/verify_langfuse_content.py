@@ -89,10 +89,12 @@ def _smoke() -> str:
 
     lf = get_client()
 
-    async def _agent_synthesize_after_tool(tool_result_json: str, query: str) -> None:
+    async def _agent_synthesize_after_tool(
+        tool_result_json: str, query: str
+    ) -> str:
         """Имитирует синтез финального ответа Ouroboros'ом после tool вернул
         данные. Через `LLMClient.chat_async` (patched наш wrap → ouroboros_chat
-        generation в trace)."""
+        generation в trace). Возвращает текст ответа."""
         try:
             from ouroboros.llm import LLMClient
 
@@ -107,17 +109,29 @@ def _smoke() -> str:
                     "content": f"Запрос: {query}\n\nДанные tool: {tool_result_json[:2000]}",
                 },
             ]
-            await client.chat_async(
+            # max_tokens НЕ задаём — global default 256K (см. ADR-0021).
+                # Kimi-k2p6 тратит часть output на скрытый reasoning_content;
+                # с малым max_tokens видимый content приходит пустым.
+            msg, _usage = await client.chat_async(
                 messages=messages,
                 model="openai-compatible::kimi-k2p6",
-                max_tokens=200,
             )
+            return (msg or {}).get("content") or ""
         except Exception as exc:  # noqa: BLE001
             print(f"  [synthesize] failed: {type(exc).__name__}: {exc}")
+            return ""
 
-    def _user_request(task_label: str, tool_call):
+    def _user_request(task_label: str, tool_call, synthesize_after: bool = True):
         """Один user-request: root user_request span + propagate + tool +
-        synthesize. Имитирует Ouroboros handle_task."""
+        опциональный synthesize. Имитирует Ouroboros handle_task.
+
+        synthesize_after:
+            True (rag, web) — после tool делаем агентский LLM-синтез из
+                JSON-данных (имитация core loop).
+            False (analyst) — внутри analyst_query graph subgraph уже есть
+                synthesize узел который сам генерит markdown. Дополнительный
+                fake-synthesize создаёт лишний span и переписывает trace.io.
+        """
         ctx = FakeCtx(
             task_id=f"verify_{ts}_{task_label}",
             current_chat_id=f"verify_chat_{ts}",
@@ -127,14 +141,33 @@ def _smoke() -> str:
         with lf.start_as_current_observation(
             name="user_request",
             as_type="agent",
-            input={"task": task_label},
-        ):
+            input={"task": task_label, "query": None},  # query задаётся в tool_call
+        ) as root_span:
             with propagate_attributes(
                 session_id=sid, user_id=user_id, trace_name="user_request"
             ):
                 tool_result, query = tool_call(ctx)
-                # Имитируем синтез ответа агентом
-                asyncio.run(_agent_synthesize_after_tool(tool_result, query))
+                root_span.update(input={"task": task_label, "query": query})
+                if synthesize_after:
+                    final_answer = asyncio.run(
+                        _agent_synthesize_after_tool(tool_result, query)
+                    )
+                else:
+                    # Для analyst tool сам уже синтезировал в `tool_result`
+                    # (graph узел synthesize). Парсим его и берём synthesis.
+                    try:
+                        parsed = json.loads(tool_result) if isinstance(
+                            tool_result, str
+                        ) else tool_result
+                        final_answer = (
+                            parsed.get("synthesis", "")
+                            if isinstance(parsed, dict)
+                            else str(tool_result)
+                        )
+                    except Exception:  # noqa: BLE001
+                        final_answer = str(tool_result)[:1000]
+                output_payload = {"answer": final_answer}
+                root_span.update(output=output_payload)
 
     def _call_rag(ctx):
         q = "OPEC квоты добычи нефти 2026"
@@ -150,7 +183,7 @@ def _smoke() -> str:
 
     _user_request("rag", _call_rag)
     _user_request("web", _call_web)
-    _user_request("analyst", _call_analyst)
+    _user_request("analyst", _call_analyst, synthesize_after=False)
 
     lf.flush()
     print("\n[verify] flush ok, waiting 15s for ingestion…")

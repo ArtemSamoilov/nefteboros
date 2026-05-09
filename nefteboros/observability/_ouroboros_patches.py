@@ -80,6 +80,31 @@ def _patch_openai_module() -> None:
         logger.debug("openai instrumentor patch skipped: %s", exc)
 
 
+def _extract_final_answer(events: Any) -> Any:
+    """Вытащить финальный ответ агента из result `handle_task`.
+
+    `OuroborosAgent.handle_task` → `run_llm_loop` возвращает
+    `list[Dict[str, Any]]` — события loop'а. Финальный ответ — последнее
+    assistant-сообщение (без tool_calls). Используется для записи в
+    `output` root user_request span'а.
+    """
+    if not isinstance(events, list):
+        return events  # на всякий случай отдаём как есть
+    # Ищем с конца assistant message с непустым content и без tool_calls.
+    for ev in reversed(events):
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("role") != "assistant":
+            continue
+        if ev.get("tool_calls"):
+            continue
+        content = ev.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+    # Fallback: вернуть compact summary всех events.
+    return {"events_count": len(events)}
+
+
 def _patch_handle_task() -> None:
     """Обернуть `OuroborosAgent.handle_task` в root observation +
     propagate_attributes.
@@ -123,16 +148,28 @@ def _patch_handle_task() -> None:
 
         try:
             client = get_client()
-            # Явный root span — без него каждый openai-call ходит в свой
-            # trace, не группируется. С ним все child observations попадают
-            # в один trace с собственно session_id и trace_name.
             with client.start_as_current_observation(
                 name="user_request",
                 as_type="agent",
                 input={"query": task_text} if task_text else None,
-            ):
+            ) as root_span:
                 with propagate_attributes(**propagate_kwargs):
-                    return original(self, task)
+                    result = original(self, task)
+                # Записать финальный ответ в output root span'а — Langfuse
+                # автонаследует в trace-level (Tracing/Traces tab → колонка
+                # Output). `set_trace_io` deprecated в 4.x.
+                final_answer = _extract_final_answer(result)
+                if final_answer is not None:
+                    output_payload = (
+                        {"answer": final_answer}
+                        if not isinstance(final_answer, dict)
+                        else final_answer
+                    )
+                    try:
+                        root_span.update(output=output_payload)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return result
         except Exception:
             logger.exception(
                 "handle_task observability wrapper failed; running without obs"
