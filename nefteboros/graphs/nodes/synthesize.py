@@ -18,6 +18,7 @@ import os
 import pathlib
 from typing import Any
 
+from nefteboros.forecast.schema import ModelMethod
 from nefteboros.graphs.state import Citation, GraphState, IntentType
 
 logger = logging.getLogger(__name__)
@@ -98,11 +99,15 @@ def _build_citations(state: GraphState) -> list[Citation]:
             )
             continue
         horizon_value = getattr(result.horizon, "value", str(result.horizon))
+        # ADR-0024 supersedes ADR-0012 для production OU forecast (Track A v2.1).
+        # Legacy backtest методы (sarimax, gbr, ensemble, random_walk) остаются на
+        # ADR-0012 — original stat-model ensemble. См. ADR-0024 §A4.
+        adr_tag = "ADR-0024" if method == ModelMethod.OU_REGIME else "ADR-0012"
         citations.append(
             Citation(
                 tag=(
                     f"[forecast_model:{result.asset}@{horizon_value}, "
-                    f"{method.value}, ADR-0012]"
+                    f"{method.value}, {adr_tag}]"
                 ),
                 kind="forecast_model",
                 detail=(
