@@ -62,10 +62,9 @@ from nefteboros.forecast.schema import (
 logger = logging.getLogger(__name__)
 
 
-# Method tag для citation. ADR-0024 использует OU вместо ensemble.
-# Сохраняем ModelMethod.ENSEMBLE для совместимости schema, но в metadata
-# указываем "ou_regime" как реальный метод.
-_OU_METHOD_TAG = "ou_regime"
+# Production method tag: ModelMethod.OU_REGIME (ADR-0024 §«Implementation»).
+# Citation format: [Forecast: ou_regime, scenario=<name>, CI <level>].
+_OU_METHOD_TAG = ModelMethod.OU_REGIME.value
 
 
 # =============================================================================
@@ -163,12 +162,12 @@ def forecast(
     result = ForecastResult(
         asset=asset,
         horizon=h,
-        method=ModelMethod.ENSEMBLE,  # placeholder для schema compat; real method = ou_regime
+        method=ModelMethod.OU_REGIME,  # ADR-0024: production OU per scenario
         points=[point],
         interpretation="",  # заполним ниже
         backtest_summary=None,
         metadata={
-            "method_tag": _OU_METHOD_TAG,  # ← реальный method
+            "method_tag": _OU_METHOD_TAG,  # legacy tag kept for backward compat
             "primary_source": meta.primary_source.value,
             "spot": spot,
             "spot_observation_date": str(history.index[-1].date()),

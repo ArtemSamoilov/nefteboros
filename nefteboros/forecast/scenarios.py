@@ -130,14 +130,16 @@ ASSET_PARAMS: dict[str, dict[ScenarioName, OUParams]] = {
         # source base: spot $100, Goldman pre-cease $99 → $98 как «текущее shock equilibrium»
         # source bull: Goldman severe Q4 $115 при 2 mbpd loss + extension → $120
         # source theta: bear half-life 2.8mo (calm regime fast); base 4.2mo; bull 5.5mo (turbulent slow)
-        # source sigma: pre_war 2021 ~22%, war_shock ~55%, cap_phase ~28%, OVX current ~70% — regime mid
-        "bear": OUParams(mu_0=70.0,  theta=3.0, sigma=0.20, inflation=_OIL_INFLATION),
+        # source sigma: pre_war 2021 ~22%, war_shock ~55%, cap_phase ~28%, OVX current ~70%
+        # A8 recalibration: bear σ 0.20→0.25 для better 12m coverage на mixed history
+        # (backtest showed 0.25 cov на 12m с σ=0.20; goal ~0.5 cov)
+        "bear": OUParams(mu_0=70.0,  theta=3.0, sigma=0.25, inflation=_OIL_INFLATION),
         "base": OUParams(mu_0=98.0,  theta=2.0, sigma=0.25, inflation=_OIL_INFLATION),
         "bull": OUParams(mu_0=120.0, theta=1.5, sigma=0.30, inflation=_OIL_INFLATION),
     },
     "wti": {
-        # WTI ~ Brent − $5 typical premium; same volatility regime
-        "bear": OUParams(mu_0=66.0,  theta=3.0, sigma=0.20, inflation=_OIL_INFLATION),
+        # WTI ~ Brent − $5 typical premium; same volatility regime (A8: bear 0.20→0.25)
+        "bear": OUParams(mu_0=66.0,  theta=3.0, sigma=0.25, inflation=_OIL_INFLATION),
         "base": OUParams(mu_0=94.0,  theta=2.0, sigma=0.25, inflation=_OIL_INFLATION),
         "bull": OUParams(mu_0=115.0, theta=1.5, sigma=0.30, inflation=_OIL_INFLATION),
     },
@@ -147,19 +149,22 @@ ASSET_PARAMS: dict[str, dict[ScenarioName, OUParams]] = {
         # base: Brent$98 − base discount $17 (cap_phase_2) = $81
         # bull: Brent$120 − bull discount $25 = $95
         # +sigma adjustment +2pp для spread variability
-        "bear": OUParams(mu_0=62.0, theta=3.0, sigma=0.22, inflation=_OIL_INFLATION),
+        # A8: bear σ 0.22→0.27 (consistent +5pp bump к oil bear)
+        "bear": OUParams(mu_0=62.0, theta=3.0, sigma=0.27, inflation=_OIL_INFLATION),
         "base": OUParams(mu_0=81.0, theta=2.0, sigma=0.27, inflation=_OIL_INFLATION),
         "bull": OUParams(mu_0=95.0, theta=1.5, sigma=0.32, inflation=_OIL_INFLATION),
     },
     "espo": {
         # ESPO ~ Brent − $5 typical (Asian premium pre-war, normalize sanctions)
-        "bear": OUParams(mu_0=65.0,  theta=3.0, sigma=0.21, inflation=_OIL_INFLATION),
+        # A8: bear σ 0.21→0.26
+        "bear": OUParams(mu_0=65.0,  theta=3.0, sigma=0.26, inflation=_OIL_INFLATION),
         "base": OUParams(mu_0=92.0,  theta=2.0, sigma=0.26, inflation=_OIL_INFLATION),
         "bull": OUParams(mu_0=113.0, theta=1.5, sigma=0.31, inflation=_OIL_INFLATION),
     },
     "urals_minfin_blend": {
         # 0.78 × urals + 0.22 × espo (Минфин НДПИ-формула с 2025-01)
-        "bear": OUParams(mu_0=63.0, theta=3.0, sigma=0.22, inflation=_OIL_INFLATION),
+        # A8: bear σ 0.22→0.27
+        "bear": OUParams(mu_0=63.0, theta=3.0, sigma=0.27, inflation=_OIL_INFLATION),
         "base": OUParams(mu_0=83.0, theta=2.0, sigma=0.27, inflation=_OIL_INFLATION),
         "bull": OUParams(mu_0=99.0, theta=1.5, sigma=0.32, inflation=_OIL_INFLATION),
     },
@@ -168,36 +173,48 @@ ASSET_PARAMS: dict[str, dict[ScenarioName, OUParams]] = {
     # source: HH 2022 = 91% real vol, 2023 = 69%; TTF 2022 extreme. Газ inherently
     # more volatile, slower mean reversion (less liquid markets, regime persists).
     # Inflation 4%/y — gas substitutable (electric heating, renewables) → lower passthrough
+    # A8 recalibration: bear σ 0.35→0.45 (HH bear had 0.25 cov на 6m+;
+    # газ spikes 2022 outside CI; goal — bear CI частично покрывает spikes).
+    # Constraint: bear σ ≤ base σ (semantic: bear=calm regime, vol ≤ base shock).
     "henry_hub": {
-        "bear": OUParams(mu_0=2.30, theta=2.0, sigma=0.35, inflation=0.04),
+        "bear": OUParams(mu_0=2.30, theta=2.0, sigma=0.45, inflation=0.04),
         "base": OUParams(mu_0=2.77, theta=1.5, sigma=0.45, inflation=0.04),
         "bull": OUParams(mu_0=3.50, theta=1.0, sigma=0.55, inflation=0.04),
     },
     "ttf": {
-        "bear": OUParams(mu_0=35.0, theta=2.0, sigma=0.35, inflation=0.04),
+        # A8: bear σ 0.35→0.45 (= base, не inversion)
+        "bear": OUParams(mu_0=35.0, theta=2.0, sigma=0.45, inflation=0.04),
         "base": OUParams(mu_0=43.0, theta=1.5, sigma=0.45, inflation=0.04),
         "bull": OUParams(mu_0=55.0, theta=1.0, sigma=0.50, inflation=0.04),
     },
 
     # ----- Российский нефтегаз proxy (INVERTED bull — escalation hurts equity) -----
-    # source: Q1 2022 GAZP −50% YTD при Brent +50% — Russia-specific factors
-    # (sanctions, RUB outflow) доминируют над commodity tailwind.
-    # Inflation 10%/y — RUB equity nominal: CBR rate 16-18% + страновая премия;
-    # частично включает рост цен фон.
+    # source: Q1 2022 GAZP nominal 330→132 RUB (-60%) за 3 мес, потом slow recovery
+    # к 165 (Aug 2022). Russia-specific factors (sanctions, RUB outflow, foreign
+    # capital exit) доминируют над commodity tailwind.
+    #
+    # Inflation scenario-specific (A6 recalibration, ADR-0024 §«Trade-offs» №4):
+    # - bear/base: 10%/y — CBR rate + страновая премия в стандартном режиме
+    # - bull: 3%/y — RUB девальвируется в hard currency на escalation;
+    #   equity nominal не получает CPI lift (FX dynamic доминирует)
+    # μ_bull откалиброван к -25..-40% от spot для match 2022 panic depth.
     "moexog": {
         "bear": OUParams(mu_0=7200.0, theta=2.0, sigma=0.18, inflation=0.10),
         "base": OUParams(mu_0=6700.0, theta=1.5, sigma=0.22, inflation=0.10),
-        "bull": OUParams(mu_0=5500.0, theta=1.0, sigma=0.30, inflation=0.10),
+        # bull: μ -33% от spot (-26% effective at 12m)
+        "bull": OUParams(mu_0=3800.0, theta=1.0, sigma=0.32, inflation=0.03),
     },
     "gazp": {
         "bear": OUParams(mu_0=130.0, theta=2.0, sigma=0.20, inflation=0.10),
         "base": OUParams(mu_0=117.0, theta=1.5, sigma=0.25, inflation=0.10),
-        "bull": OUParams(mu_0=85.0,  theta=1.0, sigma=0.35, inflation=0.10),
+        # bull: μ -49% от spot (-29% effective at 12m), match 2022 panic
+        "bull": OUParams(mu_0=60.0,  theta=1.0, sigma=0.40, inflation=0.03),
     },
     "nvtk": {
         "bear": OUParams(mu_0=1280.0, theta=2.0, sigma=0.22, inflation=0.10),
         "base": OUParams(mu_0=1124.0, theta=1.5, sigma=0.27, inflation=0.10),
-        "bull": OUParams(mu_0=820.0,  theta=1.0, sigma=0.40, inflation=0.10),
+        # bull: μ -47% от spot (-28% effective at 12m)
+        "bull": OUParams(mu_0=600.0,  theta=1.0, sigma=0.45, inflation=0.03),
     },
 }
 
@@ -247,8 +264,15 @@ def compute_ou_forecast(
     mu_t = params.mu_0 * (1 + params.inflation * t)
     mid = mu_t + (spot - params.mu_0) * math.exp(-params.theta * t)
 
-    # Variance bounded: σ²/(2θ) × (1 - exp(-2θt))
-    sigma_dollar = params.sigma * spot
+    # Variance bounded: σ²/(2θ) × (1 - exp(-2θt)).
+    # ADR-0024 §A7: sigma_dollar = σ × mid (не σ × spot). Это академически
+    # корректнее когда mid дрейфует далеко от spot (bear/bull на длинных
+    # horizons). Sensitivity test в tests/test_ou_sigma_anchor.py показал что
+    # на extreme bear (spot=$100, μ=$70, 12m) разница в ширине CI ~30% между
+    # σ×spot vs σ×mid; на base (mid≈spot) разница <2%.
+    # mid in OU не зависит от σ (deterministic от θ, μ_0, S_0), потому formula
+    # не recursive.
+    sigma_dollar = params.sigma * abs(mid)
     var = (sigma_dollar ** 2 / (2 * params.theta)) * (1 - math.exp(-2 * params.theta * t))
     sd = math.sqrt(var)
 
