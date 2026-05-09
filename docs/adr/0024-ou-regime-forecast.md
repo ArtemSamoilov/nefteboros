@@ -237,6 +237,8 @@ CI 95%(t)      = E[S_t] ± 1.960 × √Var[S_t]
 
 Backtest infrastructure (`eval_forecast.py`) продолжает использовать `RANDOM_WALK/SARIMAX/XGBOOST/ENSEMBLE` для baseline regression — не пострадал.
 
+**D6 (citation parser) coverage** — post-merge follow-up в [PR #43](https://github.com/ArtemSamoilov/nefteboros/pull/43): `nefteboros/citations/patterns.FORECAST_PATTERN` расширен опциональной группой `(?P<scenario>[a-zA-Z_][a-zA-Z0-9_]*)` между model и CI. `ParsedForecastCitation.scenario` доступен для validator и downstream consumers. Legacy формат без scenario (`[Forecast: ensemble, CI 80%]`) продолжает матчиться — нужен для backtest baseline. Без этого fix'а citation_correctness в e2e baseline для всех новых forecast-цитат был бы 0%. Дыру раскрыл sanity-check на реальном паттерне в этой сессии (manager review).
+
 ### A5 — Walk-forward backtest для OU production path
 
 **Решение:** новый скрипт `scripts/eval/eval_ou.py` — walk-forward на исторических snapshots, monthly rolling origin (по умолчанию). Параметры `ASSET_PARAMS` **статичны с 2026-05-08** (вариант (а) из brief): backtest применяет current parameters к историческим точкам — это **тест анахронистической устойчивости**, насколько калибровка universal через historical regimes.
