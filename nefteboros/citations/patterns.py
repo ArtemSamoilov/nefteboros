@@ -5,7 +5,9 @@
 
 - **RAG**:      ``[Source title, p.X]``         или   ``[Source title, p.X-Y]``
 - **Web**:      ``[<title>](<url>) — <hostname>, web``  (markdown-link)
-- **Forecast**: ``[Forecast: model, CI X%]``    или   ``[Forecast: model, CI 80/95%]``
+- **Forecast**: ``[Forecast: model, scenario=name, CI X%]`` (после Track A / ADR-0024,
+  scenario обязателен для production OU forecast). Legacy без scenario тоже
+  поддерживается (``[Forecast: ensemble, CI 80%]``) — для backtest baseline.
 
 Решения:
 
@@ -19,9 +21,12 @@
 2. **Page range optional.** Чанк может покрывать одну страницу (``p.14``)
    или диапазон (``p.5-10``) — обе формы валидны (см. SYSTEM.md:76).
 
-3. **Forecast CI как digits-and-slash.** Текущий v2.0.0 формат пишется как
-   ``CI 80%`` или ``CI 80/95%`` (двойной CI). Расширение под scenario
-   (Track A, ADR-0023) — отдельным коммитом, см. roadmap-v2.1 D6.
+3. **Forecast CI как digits-and-slash.** Текущий формат пишется как
+   ``CI 80%`` или ``CI 80/95%`` (двойной CI).
+
+4. **Scenario field — опциональный, добавлен после Track A (ADR-0024).** Новый
+   production формат: ``[Forecast: ou_regime, scenario=base, CI 80%]``. Legacy
+   (без scenario) сохранён для backtest baseline и старых ответов.
 
 4. **Web tier из ответа агента не извлекается.** Tier есть в SearchHit, но
    LLM пишет только title/url/hostname (см. SYSTEM.md:79). Validator
@@ -51,9 +56,11 @@ WEB_PATTERN: re.Pattern[str] = re.compile(
     r"\s+—\s+(?P<host>[^\s,]+),\s*web",
 )
 
-#: Forecast citation. Два формата встречаются в v2.0.0:
+#: Forecast citation. Два формата встречаются:
 #:
-#: - **Spec из SYSTEM.md/ADR-0019**: ``[Forecast: model, CI X%]``
+#: - **Spec из SYSTEM.md/ADR-0019** (LLM-уровень): ``[Forecast: model, scenario=name, CI X%]``
+#:   После Track A (ADR-0024) поле ``scenario`` обязательно для production OU.
+#:   Legacy без scenario — для backtest baseline.
 #: - **Реальный output `synthesize` ноды**: ``[forecast_model:asset@horizon, method, ADR-XXXX]``
 #:   (см. ``nefteboros/graphs/state.py`` ``Citation.tag`` и
 #:   ``nefteboros/graphs/nodes/synthesize.py`` ``_build_forecast_citations``).
@@ -63,7 +70,9 @@ WEB_PATTERN: re.Pattern[str] = re.compile(
 #: корректно сейчас, без правки synthesize/SYSTEM.md (отдельный fix).
 FORECAST_PATTERN: re.Pattern[str] = re.compile(
     r"\[(?:"
-    r"Forecast:\s*(?P<model>[^,\]]+?),\s*CI\s*(?P<ci>[\d/]+%)"
+    r"Forecast:\s*(?P<model>[^,\]]+?)"
+    r"(?:,\s*scenario=(?P<scenario>[a-zA-Z_][a-zA-Z0-9_]*))?"
+    r",\s*CI\s*(?P<ci>[\d/]+%)"
     r"|"
     r"forecast_model:(?P<asset>[^@\]]+)@(?P<horizon>[^,\]]+)"
     r"(?:,\s*(?P<method>[^,\]]+))?(?:,\s*(?P<adr>ADR-\d+))?"
@@ -119,8 +128,9 @@ class ParsedForecastCitation:
     """Forecast citation."""
 
     model: str
-    ci: str  # ``80%`` или ``80/95%`` (как написано в ответе)
+    ci: str  # ``80%`` или ``80/95%`` (как написано в ответе); пусто для format 2
     raw: str
+    scenario: str | None = None  # base/bear/bull — None для legacy/format 2
 
 
 # =============================================================================
@@ -156,14 +166,21 @@ def parse_web_citations(text: str) -> Iterator[ParsedWebCitation]:
 
 
 def parse_forecast_citations(text: str) -> Iterator[ParsedForecastCitation]:
-    """Извлечь все forecast-цитаты в одном из двух v2.0.0 форматов."""
+    """Извлечь все forecast-цитаты в одном из двух форматов.
+
+    Format 1 (spec, LLM-уровень): ``[Forecast: model, scenario=name, CI X%]``
+                                  или ``[Forecast: model, CI X%]`` (legacy).
+    Format 2 (synthesize-output): ``[forecast_model:asset@horizon, method, ADR-XXXX]``.
+    """
     for m in FORECAST_PATTERN.finditer(text):
-        # Формат 1 (spec): `[Forecast: model, CI X%]`
+        # Формат 1 (spec): `[Forecast: model, [scenario=name, ]CI X%]`
         if m.group("model"):
+            scenario_raw = m.group("scenario")
             yield ParsedForecastCitation(
                 model=m.group("model").strip(),
                 ci=m.group("ci").strip(),
                 raw=m.group(0),
+                scenario=scenario_raw.strip() if scenario_raw else None,
             )
         # Формат 2 (реальный graph output): `[forecast_model:asset@horizon, ...]`
         elif m.group("asset"):
@@ -174,6 +191,7 @@ def parse_forecast_citations(text: str) -> Iterator[ParsedForecastCitation]:
                 model=method or f"{asset}@{horizon}",
                 ci="",  # формат 2 не несёт CI в самой цитате
                 raw=m.group(0),
+                scenario=None,  # формат 2 не несёт scenario
             )
 
 

@@ -283,6 +283,66 @@ class TestForecastPattern:
         assert len(cites) == 1
         assert cites[0].model == expected_model
 
+    @pytest.mark.parametrize(
+        "text, expected_model, expected_scenario, expected_ci",
+        [
+            # Новый production формат после Track A / ADR-0024
+            (
+                "[Forecast: ou_regime, scenario=base, CI 80%]",
+                "ou_regime", "base", "80%",
+            ),
+            (
+                "[Forecast: ou_regime, scenario=bear, CI 95%]",
+                "ou_regime", "bear", "95%",
+            ),
+            (
+                "[Forecast: ou_regime, scenario=bull, CI 80/95%]",
+                "ou_regime", "bull", "80/95%",
+            ),
+            # В тексте с контекстом
+            (
+                "Прогноз $80-$120 [Forecast: ou_regime, scenario=base, CI 80%].",
+                "ou_regime", "base", "80%",
+            ),
+            # Spread-вариант (ADR-0024 §Implementation)
+            (
+                "[Forecast: ou_regime_spread, scenario=bear, CI 80%]",
+                "ou_regime_spread", "bear", "80%",
+            ),
+        ],
+    )
+    def test_track_a_scenario_format(
+        self,
+        text: str,
+        expected_model: str,
+        expected_scenario: str,
+        expected_ci: str,
+    ) -> None:
+        """После Track A (ADR-0024) обязательное поле scenario=name между
+        model и CI. D6 regex должен извлекать его в ParsedForecastCitation.scenario.
+        """
+        cites = list(parse_forecast_citations(text))
+        assert len(cites) == 1, f"expected 1 match, got {len(cites)}"
+        c = cites[0]
+        assert c.model == expected_model
+        assert c.scenario == expected_scenario
+        assert c.ci == expected_ci
+
+    def test_legacy_format_scenario_is_none(self) -> None:
+        """Legacy формат без scenario: ParsedForecastCitation.scenario = None."""
+        text = "[Forecast: ensemble, CI 80%]"
+        cites = list(parse_forecast_citations(text))
+        assert len(cites) == 1
+        assert cites[0].scenario is None
+        assert cites[0].model == "ensemble"
+
+    def test_synthesize_format_scenario_is_none(self) -> None:
+        """Format 2 (synthesize-output) не несёт scenario tag → None."""
+        text = "[forecast_model:brent@3m, ou_regime, ADR-0024]"
+        cites = list(parse_forecast_citations(text))
+        assert len(cites) == 1
+        assert cites[0].scenario is None
+
 
 # =============================================================================
 # Integral precision/recall на realistic корпусе
