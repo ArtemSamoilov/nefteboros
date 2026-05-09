@@ -1,0 +1,54 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Git / claude worktrees
+.git/
+.gitattributes
+.claude/
+
+# IDE
+.idea/
+.vscode/
+
+# Data — лучше mount'ить через volume, не вшивать в образ
+data/
+*.db
+*.sqlite
+.embeddings_cache/
+metrics/runs/
+chroma_db/
+
+# Local
+.env
+.env.local
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs / dev artifacts (не нужны в runtime)
+docs/
+*.md
+!README.md
+tests/
+*.ipynb
+
+# Models / heavy artifacts
+*.bin
+*.safetensors
+*.onnx
+node_modules/
+
+# Telegram / launcher (не для server runtime)
+launcher.py
+*.app/
+*.exe

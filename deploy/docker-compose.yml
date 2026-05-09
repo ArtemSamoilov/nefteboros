@@ -1,53 +1,42 @@
 # nefteboros — docker-compose
 #
-# PLACEHOLDER. Реальная реализация — в PR `feature/docker-compose`.
-#
 # Сервисы:
-#   web       — Ouroboros web UI с подключённым skill neftegaz_analyst
-#   bot       — Telegram-бот (aiogram), отдельный процесс, шерит RAG-данные с web
-#   chroma    — ChromaDB persist (опционально внешний — иначе встроенный в nefteboros)
+#   web   — nefteboros server (Ouroboros + neftegaz_analyst skill)
 #
 # Volumes:
-#   data/corpus/      — PDF (read-only mount)
-#   data/vectorstore/ — Chroma persist
-#   .embeddings_cache — кеш скачанных embedding-моделей
+#   nefteboros_data — DATA_DIR (state, logs, observability traces)
 #
-# Запуск:
-#   docker compose -f deploy/docker-compose.yml up -d
-#   docker compose -f deploy/docker-compose.yml logs -f
+# Запуск (из корня репо):
+#   docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+#   docker compose -f deploy/docker-compose.yml logs -f web
 #   docker compose -f deploy/docker-compose.yml down
 
-version: "3.9"
-
 services:
-  # web:
-  #   build:
-  #     context: ..
-  #     dockerfile: deploy/Dockerfile.app
-  #   env_file: ../.env
-  #   ports:
-  #     - "8000:8000"
-  #   volumes:
-  #     - ../data:/app/data
-  #     - embeddings_cache:/app/.embeddings_cache
-  #   restart: unless-stopped
-
-  # bot:
-  #   build:
-  #     context: ..
-  #     dockerfile: deploy/Dockerfile.app
-  #   env_file: ../.env
-  #   command: python -m nefteboros.bot.main
-  #   volumes:
-  #     - ../data:/app/data
-  #     - embeddings_cache:/app/.embeddings_cache
-  #   restart: unless-stopped
-  #   depends_on:
-  #     - web
-
-  placeholder:
-    image: alpine:latest
-    command: echo "nefteboros docker-compose placeholder, see feature/docker-compose PR"
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.app
+    image: nefteboros:dev
+    container_name: nefteboros-web
+    # .env подключаем через env_file (LANGFUSE_*, GIGACHAT_*, HYDRA_*, BRAVE_*).
+    env_file:
+      - ../.env
+    environment:
+      OUROBOROS_SERVER_HOST: 0.0.0.0
+      OUROBOROS_SERVER_PORT: "8000"
+      OUROBOROS_DATA_DIR: /app/data
+      LANGFUSE_ENABLED: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - nefteboros_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
-  embeddings_cache:
+  nefteboros_data:
