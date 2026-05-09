@@ -112,7 +112,7 @@ Date,Open,High,Low,Close,Adj Close,Volume
 **Поля:**
 
 - `scenario_type` — один из: `rag_only`, `web_only`, `rag_plus_web`, `forecast`, `out_of_scope`, `multi_tool`, `follow_up`, `unknown_with_hypothesis` (запрет на «нет данных»).
-- `held_out` — true для зафиксированного финального замера (не итерируем промпт на этих кейсах). При корпусе из 10 диалогов: 8 dev / 2 held-out.
+- `held_out` — true для зафиксированного финального замера (не итерируем промпт на этих кейсах). При корпусе из 100 диалогов: 82 dev / 18 held-out.
 - `messages` — список turn'ов в формате OpenAI/Anthropic. Single-turn = один user message; для `follow_up` — два или больше.
 - `expected_behavior.expected_keywords` — substring matches в финальном ответе (case-insensitive, частичный — ловит «квоты»/«квот»/«квотами» через корень «кво»). Базовая, дешёвая проверка.
 - `expected_min_citations` — минимальное число цитат **в формате** RAG/Web/Forecast в финальном ответе. Считаются [citation парсерами](../nefteboros/citations/patterns.py), без сверки с tool outputs (e2e оценивает финальный итог, не глубину тулов — для семантической сверки см. `eval_citations.py` на `citations_gold.jsonl`).
