@@ -30,13 +30,34 @@ Ouroboros — наследие upstream-форка (см. roadmap §«Принц
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 _PATCHED: bool = False
+
+# ContextVar для session_id текущего user-request. Устанавливается в
+# `_patch_handle_task` при входе в handle_task; читается в `_patch_llm_client_chat`
+# чтобы каждый LLM-call (включая safety supervisor через ouroboros core)
+# получил правильный session_id даже если active OTel span был потерян на
+# границе threading / context. Без этого safety supervisor traces появлялись
+# как session=None, parent=None standalone roots.
+_current_session_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "nefteboros_lf_session_id", default=None
+)
+_current_user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "nefteboros_lf_user_id", default=None
+)
+
+# PID-based fallback для случаев когда ContextVar не propagated (ThreadPoolExecutor,
+# Ouroboros тулы вызывают safety supervisor в worker thread без context inheritance).
+# Один Ouroboros worker process обрабатывает один task за раз, поэтому per-PID
+# session_id корректен для всех threads этого worker'а на время handle_task.
+_session_per_pid: dict[int, str] = {}
+_user_per_pid: dict[int, str] = {}
 
 
 def _enabled() -> bool:
@@ -146,6 +167,17 @@ def _patch_handle_task() -> None:
         if metadata:
             propagate_kwargs["metadata"] = metadata
 
+        # Установить ContextVar + PID-fallback. ContextVar работает для same-thread
+        # call chains. PID-fallback покрывает worker threads (ThreadPoolExecutor)
+        # которые НЕ inherit ContextVars (стандарт CPython): safety supervisor,
+        # tool dispatch _run threads. Все threads одного worker process делят PID
+        # и читают same session_id из _session_per_pid.
+        session_id = propagate_kwargs.get("session_id")
+        sess_token = _current_session_id.set(session_id)
+        user_token = _current_user_id.set(None)
+        pid = os.getpid()
+        if session_id:
+            _session_per_pid[pid] = session_id
         try:
             client = get_client()
             with client.start_as_current_observation(
@@ -175,6 +207,14 @@ def _patch_handle_task() -> None:
                 "handle_task observability wrapper failed; running without obs"
             )
             return original(self, task)
+        finally:
+            try:
+                _current_session_id.reset(sess_token)
+                _current_user_id.reset(user_token)
+            except (LookupError, ValueError):
+                pass
+            _session_per_pid.pop(pid, None)
+            _user_per_pid.pop(pid, None)
 
     OuroborosAgent.handle_task = patched  # type: ignore[method-assign]
     logger.info(
@@ -276,7 +316,7 @@ def _patch_llm_client_chat() -> None:
     второго элемента tuple `(msg, usage)`.
     """
     try:
-        from langfuse import get_client
+        from langfuse import get_client, propagate_attributes
 
         from ouroboros.llm import LLMClient
     except ImportError as exc:
@@ -285,6 +325,26 @@ def _patch_llm_client_chat() -> None:
 
     original_async = LLMClient.chat_async
     original_sync = LLMClient.chat
+
+    def _propagate_cm() -> Any:
+        """Build propagate_attributes context из текущих ContextVars / PID-fallback.
+
+        Ensures каждый chat call помечается session_id даже если active OTel
+        parent span потерян. Lookup chain:
+        1. ContextVar (same thread / async chain) — primary.
+        2. _session_per_pid[os.getpid()] — fallback для ThreadPoolExecutor
+           workers (safety supervisor, tool dispatch threads).
+
+        Без этого safety supervisor traces получали session=None.
+        """
+        kwargs: dict[str, Any] = {"trace_name": "user_request"}
+        sid = _current_session_id.get() or _session_per_pid.get(os.getpid())
+        if sid:
+            kwargs["session_id"] = sid
+        uid = _current_user_id.get() or _user_per_pid.get(os.getpid())
+        if uid:
+            kwargs["user_id"] = uid
+        return propagate_attributes(**kwargs)
 
     def _extract_usage_kwargs(usage: Any) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -311,20 +371,23 @@ def _patch_llm_client_chat() -> None:
         try:
             client = get_client()
             messages = kwargs.get("messages") or (args[0] if args else None)
-            with client.start_as_current_observation(
-                name="ouroboros_chat",
-                as_type="generation",
-                input=messages,
-            ) as span:
-                result = await original_async(self, *args, **kwargs)
-                if isinstance(result, tuple) and len(result) == 2:
-                    msg, usage = result
-                    update_kwargs = _extract_usage_kwargs(usage)
-                    if msg is not None:
-                        update_kwargs["output"] = msg
-                    if update_kwargs:
-                        span.update(**update_kwargs)
-                return result
+            # propagate_attributes гарантирует session_id на trace-level даже
+            # если active OTel span потерян (subprocess/threading boundary).
+            with _propagate_cm():
+                with client.start_as_current_observation(
+                    name="ouroboros_chat",
+                    as_type="generation",
+                    input=messages,
+                ) as span:
+                    result = await original_async(self, *args, **kwargs)
+                    if isinstance(result, tuple) and len(result) == 2:
+                        msg, usage = result
+                        update_kwargs = _extract_usage_kwargs(usage)
+                        if msg is not None:
+                            update_kwargs["output"] = msg
+                        if update_kwargs:
+                            span.update(**update_kwargs)
+                    return result
         except Exception:
             # Любая ошибка observability → fallback на raw call.
             logger.debug("chat_async observability wrap failed; using raw")
@@ -334,20 +397,21 @@ def _patch_llm_client_chat() -> None:
         try:
             client = get_client()
             messages = kwargs.get("messages") or (args[0] if args else None)
-            with client.start_as_current_observation(
-                name="ouroboros_chat",
-                as_type="generation",
-                input=messages,
-            ) as span:
-                result = original_sync(self, *args, **kwargs)
-                if isinstance(result, tuple) and len(result) == 2:
-                    msg, usage = result
-                    update_kwargs = _extract_usage_kwargs(usage)
-                    if msg is not None:
-                        update_kwargs["output"] = msg
-                    if update_kwargs:
-                        span.update(**update_kwargs)
-                return result
+            with _propagate_cm():
+                with client.start_as_current_observation(
+                    name="ouroboros_chat",
+                    as_type="generation",
+                    input=messages,
+                ) as span:
+                    result = original_sync(self, *args, **kwargs)
+                    if isinstance(result, tuple) and len(result) == 2:
+                        msg, usage = result
+                        update_kwargs = _extract_usage_kwargs(usage)
+                        if msg is not None:
+                            update_kwargs["output"] = msg
+                        if update_kwargs:
+                            span.update(**update_kwargs)
+                    return result
         except Exception:
             logger.debug("chat observability wrap failed; using raw")
             return original_sync(self, *args, **kwargs)
