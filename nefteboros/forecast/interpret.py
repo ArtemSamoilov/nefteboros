@@ -268,10 +268,11 @@ def _snapshot_freshness_warning(metadata: dict) -> Optional[str]:
 
 
 def _citation_hint(forecast: ForecastResult) -> str:
-    method_tag = forecast.metadata.get("method_tag", "ou_regime")
+    # Single source of truth — ModelMethod enum value (ADR-0024 + A4 fix).
+    method_label = forecast.method.value
     scenario = forecast.metadata.get("scenario_label", "base")
     return (
-        f"_Цитировать как:_ `[Forecast: {method_tag}, scenario={scenario}, CI 80%]` "
+        f"_Цитировать как:_ `[Forecast: {method_label}, scenario={scenario}, CI 80%]` "
         f"(или `CI 95%` / `CI 80/95%` если оба уровня в ответе)."
     )
 

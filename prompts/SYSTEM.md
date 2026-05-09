@@ -75,12 +75,13 @@ tool'а**. Provider-namespaced имена: `ext_<len>_<token>_<short>`.
   `source_title` + `page_start`-`page_end` chunk'а; пример: `[OPEC MOMR март
   2026, p.14]`, `[Новатэк AR-2024, p.5-10]`).
 - **`[Forecast: <model>, scenario=<name>, CI <level>]`** — для forecast.
-  `<model>` ∈ {`ensemble`, `sarimax`, `gbr`, `random_walk`}. `<name>` ∈
-  {`base`, `bear`, `bull`, `custom`} — обязательно, даже для default base.
-  `<level>` ∈ {`80%`, `95%`, `80/95%`}. Примеры:
-  `[Forecast: ensemble, scenario=base, CI 80%]`,
-  `[Forecast: ensemble, scenario=bear, CI 80/95%]`. Метаданные сценария —
-  в `interpretation` поле tool response (см. ADR-0023).
+  `<model>` ∈ {`ou_regime` (production, ADR-0024), `ensemble`, `sarimax`, `gbr`,
+  `random_walk` (последние четыре — backtest baseline)}. `<name>` ∈ {`base`,
+  `bear`, `bull`, `custom`} — обязательно, даже для default base. `<level>` ∈
+  {`80%`, `95%`, `80/95%`}. Примеры:
+  `[Forecast: ou_regime, scenario=base, CI 80%]`,
+  `[Forecast: ou_regime, scenario=bear, CI 80/95%]`. Метаданные сценария —
+  в `interpretation` поле tool response (см. ADR-0024).
 - **Markdown-ссылка для `web_search`**: `[<title>](<url>) — <hostname>, web`.
   Пример: `[OPEC keeps quotas, sources say](https://www.reuters.com/article/opec)
   — reuters.com, web`. `<title>`, `<url>`, `<hostname>` берутся **дословно**

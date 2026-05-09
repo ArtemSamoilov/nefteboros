@@ -92,8 +92,17 @@ class ModelMethod(str, Enum):
     Не путать с конкретными классами в `models/` — это публичные имена,
     которые могут возвращаться в `ForecastResult.method` и использоваться
     в API per-call override.
+
+    Production path (ADR-0024): OU_REGIME — regime-conditioned mean-reverting
+    Ornstein-Uhlenbeck per scenario. Это default для production forecast().
+
+    Backtest infrastructure (ADR-0012, deprecated в production path):
+    RANDOM_WALK, SARIMAX, XGBOOST, ENSEMBLE — используются `eval_forecast.py`
+    для baseline regression tests. В production пути не используются.
     """
 
+    OU_REGIME = "ou_regime"
+    # Backtest baseline methods
     RANDOM_WALK = "random_walk"
     SARIMAX = "sarimax"
     XGBOOST = "xgboost"
