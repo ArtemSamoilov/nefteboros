@@ -153,7 +153,7 @@ def test_smoke_out_of_scope_skips_forecast_and_synthesize_llm(monkeypatch):
             return _FakeStructured()
 
     monkeypatch.setattr(
-        "nefteboros.llm.gigachat.get_gigachat_chat_model",
+        "nefteboros.llm.router.get_chat_model",
         lambda **kwargs: _FakeChat(),
     )
 
@@ -269,7 +269,7 @@ def test_smoke_llm_disambiguate_routes_to_forecast(monkeypatch, fake_brent_3m_re
             return _FakeStructured()
 
     monkeypatch.setattr(
-        "nefteboros.llm.gigachat.get_gigachat_chat_model",
+        "nefteboros.llm.router.get_chat_model",
         lambda **kwargs: _FakeChat(),
     )
 
@@ -308,7 +308,7 @@ def test_smoke_llm_disambiguate_unavailable_falls_back_to_synthesize(monkeypatch
         raise ValueError("GIGACHAT_CREDENTIALS env not set")
 
     monkeypatch.setattr(
-        "nefteboros.llm.gigachat.get_gigachat_chat_model",
+        "nefteboros.llm.router.get_chat_model",
         angry,
     )
 

@@ -153,6 +153,10 @@ classify_intent →
 
 Lang detection (`nefteboros/search/lang.py`): доля кириллицы ≥ 30% → RU (Brave `search_lang=ru, country=RU`); иначе EN. RU-запрос ловит RU-tier1, EN — EN-tier1.
 
+## Observability (ADR-0024)
+
+Серверные трейсы всех узлов LangGraph + cost/latency идут в **Langfuse Cloud**. Декораторы `observe(name=...)` навешиваются на узлы в `nefteboros/graphs/analyst_graph.py:build_analyst_graph` через wrap при `add_node` — файлы `nodes/*.py` остаются без декораторов. Entry-points (CLI, ouroboros tool, eval скрипты) используют `invoke_with_trace(graph, state)` для открытия top-level trace на запрос. LLM-вызовы внутри узлов прикрепляют tokens/cost к текущему span'у через `log_llm_usage(usage)` (модуль `nefteboros/observability/`). Параллельно с Langfuse пишется JSON-trace в `metrics/runs/<ts>/trace.jsonl` — backup для demo-режима без Langfuse-аккаунта (`LANGFUSE_ENABLED=false`). Cost считается через иерархию: наши `COST_RATES` (kimi-k2p6, GigaChat-2-Max) → fallback `ouroboros.pricing.estimate_cost` → null.
+
 ## Эволюция
 
 Документ обновляется на каждом значимом PR'е. История изменений — в `docs/changelog/`.

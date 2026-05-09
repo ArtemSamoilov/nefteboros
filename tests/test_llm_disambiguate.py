@@ -1,7 +1,7 @@
 """Unit-тесты llm_disambiguate узла.
 
 Реальный GigaChat не вызывается — monkeypatch на
-`nefteboros.llm.gigachat.get_gigachat_chat_model`. Семантика:
+`nefteboros.llm.router.get_chat_model`. Семантика:
 
 - happy-path через `with_structured_output` (langchain helper);
 - happy-path через raw chat + JSON parse (когда structured_output не реализован);
@@ -77,7 +77,7 @@ class _FakeChat:
 
 def _patch_chat(monkeypatch, fake_chat):
     monkeypatch.setattr(
-        "nefteboros.llm.gigachat.get_gigachat_chat_model",
+        "nefteboros.llm.router.get_chat_model",
         lambda **kwargs: fake_chat,
     )
 
@@ -166,7 +166,7 @@ def test_no_creds_falls_back_to_unavailable(monkeypatch):
         raise ValueError("GIGACHAT_CREDENTIALS env not set")
 
     monkeypatch.setattr(
-        "nefteboros.llm.gigachat.get_gigachat_chat_model",
+        "nefteboros.llm.router.get_chat_model",
         angry,
     )
 

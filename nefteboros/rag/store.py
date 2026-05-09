@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from nefteboros.observability._observe import observe
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_PATH = Path(
@@ -96,6 +98,7 @@ class VectorStore:
             metadata={"hnsw:space": "cosine"},
         )
 
+    @observe(name="vector_search", as_type="retriever")
     def search(
         self,
         query_embedding: list[float],
@@ -103,7 +106,10 @@ class VectorStore:
         k: int = 30,
         where: dict | None = None,
     ) -> list[SearchHit]:
-        """Top-k cosine search с опциональным metadata-фильтром."""
+        """Top-k cosine search с опциональным metadata-фильтром.
+
+        Виден в Langfuse как `retriever` observation внутри активного trace.
+        """
         result = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=k,

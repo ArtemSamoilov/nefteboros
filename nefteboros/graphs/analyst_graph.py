@@ -1,6 +1,7 @@
 """Analyst LangGraph subgraph — wiring узлов в StateGraph.
 
-См. ADR-0014 (minimal-graph baseline) + ADR-0015 (hybrid LLM disambiguate).
+См. ADR-0014 (minimal-graph baseline) + ADR-0015 (hybrid LLM disambiguate)
++ ADR-0025 (observability — `@observe` через wrap при `add_node`).
 
 Граф:
     classify_intent (rule-based)
@@ -17,6 +18,9 @@ Build-функция возвращает скомпилированный State
 
     graph = build_analyst_graph()
     final = await graph.ainvoke(GraphState(query="прогноз brent на 3 месяца"))
+
+Каждый узел оборачивается `@observe` при регистрации в builder — span
+открывается на входе, закрывается на выходе. См. `nefteboros/observability/`.
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ from nefteboros.graphs.nodes import (
     validate_citations,
 )
 from nefteboros.graphs.state import GraphState, IntentType
+from nefteboros.observability import end_trace, observe, start_trace
+from nefteboros.observability.tracer import _current_trace
 
 
 # =============================================================================
@@ -102,11 +108,28 @@ def build_analyst_graph() -> Any:
     """
     builder: StateGraph = StateGraph(GraphState)
 
-    builder.add_node("classify_intent", _classify_node)
-    builder.add_node("llm_disambiguate", llm_disambiguate)
-    builder.add_node("forecast_call", forecast_call)
-    builder.add_node("synthesize", synthesize)
-    builder.add_node("validate_citations", validate_citations)
+    # Каждый узел оборачивается `observe(name=...)` для трейсинга. См. ADR-0025.
+    # Wrap делается здесь, в builder'е, чтобы файлы `nodes/*.py` оставались
+    # без декораторов (separation of concerns: nodes — domain логика,
+    # graph — wiring + observability).
+    #
+    # `as_type="generation"` для LLM-узлов (synthesize, llm_disambiguate) —
+    # тогда в Langfuse UI узел рисуется как chat-message с tokens / cost /
+    # model. Остальные — обычный span.
+    builder.add_node(
+        "classify_intent", observe(name="classify_intent")(_classify_node)
+    )
+    builder.add_node(
+        "llm_disambiguate",
+        observe(name="llm_disambiguate", as_type="generation")(llm_disambiguate),
+    )
+    builder.add_node("forecast_call", observe(name="forecast_call")(forecast_call))
+    builder.add_node(
+        "synthesize", observe(name="synthesize", as_type="generation")(synthesize)
+    )
+    builder.add_node(
+        "validate_citations", observe(name="validate_citations")(validate_citations)
+    )
 
     builder.set_entry_point("classify_intent")
     builder.add_conditional_edges(
@@ -133,4 +156,50 @@ def build_analyst_graph() -> Any:
     return builder.compile()
 
 
-__all__ = ["build_analyst_graph"]
+async def invoke_with_trace(graph: Any, state: GraphState) -> dict[str, Any]:
+    """Run `graph.ainvoke(state)` под open Langfuse trace + JSON-trace.
+
+    Используется CLI / eval скриптами / Track D baseline-run (где нет
+    Ouroboros tool dispatch с ToolContext). Открывает `propagate_attributes`
+    с `trace_name="analyst_request"` — все @observe-узлы графа попадают в
+    один trace в Langfuse. JSON-trace параллельно через `start_trace` /
+    `end_trace` (см. ADR-0025 §«Trace lifecycle»).
+
+    В production через Ouroboros — `traced_tool` в plugin.py делает то же
+    самое плюс прокидывает session_id из ctx.
+    """
+    query = getattr(state, "query", None)
+    trace = start_trace(query=query, name="analyst_request")
+    token = _current_trace.set(trace)
+
+    try:
+        from langfuse import propagate_attributes  # type: ignore[import-not-found]
+
+        cm = propagate_attributes(trace_name="analyst_request")
+    except ImportError:
+        cm = _NullContext()  # type: ignore[assignment]
+
+    try:
+        with cm:
+            result = await graph.ainvoke(state)
+        answer = result.get("synthesis") if isinstance(result, dict) else None
+        end_trace(trace, answer=answer)
+        return result
+    except BaseException:
+        end_trace(trace, answer=None)
+        raise
+    finally:
+        _current_trace.reset(token)
+
+
+class _NullContext:
+    """No-op context manager — fallback при отсутствии Langfuse SDK."""
+
+    def __enter__(self) -> "_NullContext":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+__all__ = ["build_analyst_graph", "invoke_with_trace"]

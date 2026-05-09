@@ -146,6 +146,12 @@ async def _call_llm(system: str, user: str) -> str:
     с profile=routing). Если в будущем поднять streaming в hydra adapter,
     можно перевести synthesize на router profile=primary и удалить ouroboros.llm
     из этого узла.
+
+    **Observability** (см. ADR-0025): usage от ouroboros
+    (prompt_tokens / completion_tokens / cost / resolved_model / provider)
+    логируется через `nefteboros.observability.log_llm_usage` — прикрепляется
+    к текущему generation-span'у узла. No-op если span context отсутствует
+    (unit-test, вызов узла напрямую).
     """
     try:
         from ouroboros.llm import LLMClient  # type: ignore[import-untyped]
@@ -157,7 +163,7 @@ async def _call_llm(system: str, user: str) -> str:
     model = os.environ.get(_MODEL_ENV, _MODEL_FALLBACK)
 
     try:
-        msg, _ = await client.chat_async(
+        msg, usage = await client.chat_async(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -173,6 +179,15 @@ async def _call_llm(system: str, user: str) -> str:
     except Exception as exc:  # noqa: BLE001 — graph node must not crash
         logger.exception("synthesize: LLM call failed")
         return f"[LLM error: {type(exc).__name__}: {exc}]"
+
+    # Observability: tokens/cost → текущий span (ADR-0025). No-op если
+    # span_context отсутствует (unit-test, вызов узла напрямую).
+    try:
+        from nefteboros.observability import log_llm_usage
+
+        log_llm_usage(usage)
+    except Exception as obs_exc:  # noqa: BLE001 — observability never breaks node
+        logger.debug("log_llm_usage failed: %s", obs_exc)
 
     content = (msg or {}).get("content")
     if not isinstance(content, str) or not content.strip():
