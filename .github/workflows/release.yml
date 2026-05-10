@@ -35,7 +35,10 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/nefteboros
+  # Hardcoded lowercase: Docker отвергает uppercase в reference (`ArtemSamoilov`).
+  # docker/metadata-action lowercases автоматически, но мы используем IMAGE_NAME
+  # напрямую в outputs build-push-action — там это не происходит.
+  IMAGE_NAME: artemsamoilov/nefteboros
 
 permissions:
   contents: read
