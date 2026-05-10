@@ -3,6 +3,7 @@ name: neftegaz_analyst
 description: Старший аналитик нефтегазового рынка — три независимых tools (analyst_query для forecast/synthesis + rag_search для documentary поиска по 802-чанковому корпусу + web_search через Brave с tier-фильтрацией и auto language detection).
 version: 0.3.1
 type: extension
+runtime: python3
 entry: plugin.py
 timeout_sec: 60
 permissions: [net, tool, route]
