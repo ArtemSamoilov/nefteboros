@@ -1,14 +1,22 @@
 # Build + push multi-platform Docker image to GHCR on tag push.
 #
+# Архитектура:
+#   - Каждая платформа собирается на нативном runner'е (без QEMU emulation).
+#     amd64 → ubuntu-latest, arm64 → ubuntu-24.04-arm.
+#   - Каждая платформа пушит образ в GHCR by digest only (без тега).
+#   - Финальный merge job собирает multi-platform manifest list и тегирует его.
+#
+# Это canonical pattern из Docker docs:
+#   https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
+#
 # Trigger:
 #   git tag vX.Y.Z && git push origin vX.Y.Z
 #
-# Output:
-#   ghcr.io/artemsamoilov/nefteboros:vX.Y.Z      — exact version
-#   ghcr.io/artemsamoilov/nefteboros:latest      — alias на последний релиз
+# Output (multi-platform manifest):
+#   ghcr.io/artemsamoilov/nefteboros:vX.Y.Z
+#   ghcr.io/artemsamoilov/nefteboros:latest
 #
-# Auth: использует встроенный GITHUB_TOKEN — никакого личного PAT не нужно.
-# Permissions packages:write выдаются только для этого workflow.
+# Auth: встроенный GITHUB_TOKEN (packages:write granted only for this workflow).
 #
 # Manual trigger через UI: Actions tab → Release Docker image → Run workflow.
 
@@ -21,25 +29,39 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Image tag (e.g. v2.3.0). Default: 'manual'."
+        description: "Image tag (e.g. v2.3.1). Default: 'manual'."
         required: false
         default: "manual"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/nefteboros
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
 
     steps:
+      - name: Prepare platform pair
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU (for arm64 cross-build)
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -47,35 +69,86 @@ jobs:
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
+      - name: Docker labels (для каждого single-arch образа)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/nefteboros
-          # vX.Y.Z + latest; manual run → :manual.
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.app
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Push by digest only — финальный manifest list создаст merge job.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          # Per-platform cache scope — чтобы amd64 и arm64 не дрались за один кэш.
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute manifest tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # vX.Y.Z + latest на push tag; manual run → :manual (или указанный input).
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.event_name == 'push' }}
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - name: Build and push (linux/amd64 + linux/arm64)
-        uses: docker/build-push-action@v5
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          context: .
-          file: deploy/Dockerfile.app
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # GitHub Actions cache для слоёв — рекреация быстрее (1-3 мин на cache hit).
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Image digest
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
         run: |
-          echo "Pushed manifests:"
-          echo "${{ steps.meta.outputs.tags }}"
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
