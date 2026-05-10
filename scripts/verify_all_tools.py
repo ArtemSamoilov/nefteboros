@@ -13,10 +13,20 @@ import websockets
 from langfuse import Langfuse, get_client
 
 
+import os
+
+# VERIFY_ENV ставит unique suffix к запросу — local и prod пишут в одну
+# Langfuse project (одинаковые ключи) + bridge.handle_web_message hardcode'ит
+# session=chat:1, поэтому без suffix readback по latest-by-marker сматчит
+# trace из чужой среды. С suffix `[LOCAL]`/`[PROD]` marker в input
+# различается → trace.list().filter(input contains marker) даёт чистый набор.
+_ENV_TAG = os.environ.get("VERIFY_ENV", "").strip().upper() or "DEV"
+_TAG_SUFFIX = f" [{_ENV_TAG}]"
+
 QUERIES = [
-    ("web_search",    "Какая текущая цена нефти Brent сегодня? Дай актуальное число."),
-    ("rag_search",    "Что говорится в отчёте OPEC 2025 про квоты добычи участников картеля?"),
-    ("analyst_query", "Сделай прогноз цены Brent на ближайшие 3 месяца. Используй методологию SARIMAX и покажи числа."),
+    ("web_search",    f"Какая текущая цена нефти Brent сегодня? Дай актуальное число.{_TAG_SUFFIX}"),
+    ("rag_search",    f"Что говорится в отчёте OPEC 2025 про квоты добычи участников картеля?{_TAG_SUFFIX}"),
+    ("analyst_query", f"Сделай прогноз цены Brent на ближайшие 3 месяца. Используй методологию SARIMAX и покажи числа.{_TAG_SUFFIX}"),
 ]
 
 
@@ -65,8 +75,18 @@ def main() -> int:
     print("\n=== TRACES ===", flush=True)
     ok_all = True
     for label, q in QUERIES:
-        marker = q[:25]
-        matches = [t for t in all_ts if t.session_id == "chat:1" and marker in str(t.input or "")]
+        # marker_head — первые 25 chars запроса (выше всех tag suffix'ов).
+        # marker_tag — `[LOCAL]`/`[PROD]` суффикс. Trace должен иметь ОБА —
+        # без tag matcher сматчит trace из чужой среды (одна Langfuse project,
+        # одна session chat:1).
+        marker_head = q[:25]
+        marker_tag = _TAG_SUFFIX.strip()  # "[LOCAL]" / "[PROD]"
+        matches = [
+            t for t in all_ts
+            if t.session_id == "chat:1"
+            and marker_head in str(t.input or "")
+            and marker_tag in str(t.input or "")
+        ]
         matches = sorted(matches, key=lambda t: t.timestamp or 0, reverse=True)
         if not matches:
             print(f"\n[{label}] ✗ trace not found")
@@ -75,9 +95,19 @@ def main() -> int:
         t = matches[0]
         obs = c.api.legacy.observations_v1.get_many(trace_id=t.id, limit=100).data
         obs_names = sorted(set(o.name for o in obs))
-        n_gen = sum(1 for o in obs if o.type == "GENERATION")
+        # Only count generations с реальным usage (input+output > 0). Иначе
+        # это «пустой» LLM call (e.g. llm_disambiguate через langchain-gigachat
+        # bypass'ит наш LLMClient.chat patch — usage не приходит, cost не вычислить
+        # без tokens). Span всё-равно создан Langfuse'ом, но cost legitimно 0.
+        gens = [o for o in obs if o.type == "GENERATION"]
+        gens_with_usage = [
+            g for g in gens
+            if getattr(g, "usage", None)
+            and (getattr(g.usage, "total", 0) or 0) > 0
+        ]
+        n_gen = len(gens_with_usage)
         n_gen_cost = sum(
-            1 for o in obs if o.type == "GENERATION" and getattr(o, "calculated_total_cost", None)
+            1 for o in gens_with_usage if getattr(o, "calculated_total_cost", None)
         )
         output_str = str(t.output)
         is_real_output = "answer" in output_str and "events_count" not in output_str

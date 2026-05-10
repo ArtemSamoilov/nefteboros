@@ -1,0 +1,81 @@
+# Build + push multi-platform Docker image to GHCR on tag push.
+#
+# Trigger:
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# Output:
+#   ghcr.io/artemsamoilov/nefteboros:vX.Y.Z      — exact version
+#   ghcr.io/artemsamoilov/nefteboros:latest      — alias на последний релиз
+#
+# Auth: использует встроенный GITHUB_TOKEN — никакого личного PAT не нужно.
+# Permissions packages:write выдаются только для этого workflow.
+#
+# Manual trigger через UI: Actions tab → Release Docker image → Run workflow.
+
+name: Release Docker image
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag (e.g. v2.3.0). Default: 'manual'."
+        required: false
+        default: "manual"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (for arm64 cross-build)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/nefteboros
+          # vX.Y.Z + latest; manual run → :manual.
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and push (linux/amd64 + linux/arm64)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/Dockerfile.app
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub Actions cache для слоёв — рекреация быстрее (1-3 мин на cache hit).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image digest
+        run: |
+          echo "Pushed manifests:"
+          echo "${{ steps.meta.outputs.tags }}"
