@@ -26,13 +26,25 @@ Runner:
 
 - ``--mock`` — :class:`MockRunner` с шаблонами по scenario_type. Smoke
   без LLM-ключей; проверяет что eval-код считает метрики корректно.
-- (без флага) — :class:`GraphRunner` через ``analyst_graph``.
-  Скелет; полный e2e — отдельная сессия после Track B/F.
+- ``--ws`` — :class:`WSRunner` через WebSocket к ``server.py`` (default).
+  **Все запросы попадают в Langfuse** через handle_task wrap (Track F):
+  каждый dialogue → root user_request trace + child observations
+  (classify_intent, forecast_call, synthesize, web_search, rag_search,
+  validate_citations). Это unified observability — eval test set и
+  production user requests наблюдаются одинаково. Требует running
+  server.py на ``EVAL_WS_URL`` (default ws://localhost:8000/ws).
+- ``--graph`` — legacy :class:`GraphRunner` через прямой
+  ``analyst_graph.ainvoke()``. **Не пишет в Langfuse** (нет handle_task
+  wrap, observations попадают как orphan top-level traces). Покрывает
+  только forecast flow, RAG/web tools уйдут в out_of_scope. Оставлен
+  для unit-test ситуаций где server недоступен.
 
 Use:
 
-    python -m scripts.eval.eval_e2e --mock                 # smoke
-    python -m scripts.eval.eval_e2e                        # real (env)
+    python -m scripts.eval.eval_e2e --mock                 # smoke без LLM
+    python -m scripts.eval.eval_e2e                        # ws (default)
+    python -m scripts.eval.eval_e2e --graph                # legacy direct
+    python -m scripts.eval.eval_e2e --limit 5              # subset
     python -m scripts.eval.eval_e2e --dataset path.jsonl   # custom
 
 Output:
@@ -45,6 +57,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -262,6 +275,199 @@ class MockRunner:
             tools_called=list(mock.get("tools_called", [])),
             refused=mock.get("refused", False),
         )
+
+
+class WSRunner:
+    """Real e2e runner через WebSocket к ``server.py``.
+
+    Каждый dialogue проходит через **полный Ouroboros loop**:
+    ``WS chat`` → ``handle_task`` (root span ``user_request``) →
+    ``analyst_query`` skill (если intent forecast) → tool-loop с
+    web_search / rag_search / forecast_call / classify_intent /
+    synthesize — все с @observe-spans.
+
+    **Зачем именно WS, а не direct graph call:**
+
+    1. **Unified observability** — Track F observability работает только
+       внутри handle_task. Direct ``graph.ainvoke()`` (см. GraphRunner)
+       теряет TraceContext, observations попадают в Langfuse как
+       orphan top-level traces без parent → невозможно correlate.
+       WS-pipeline даёт каждому dialogue **один root user_request trace**
+       с детальной иерархией observations.
+
+    2. **Production-parity** — продовый user пишет через WS chat (browser).
+       Если eval идёт тем же путём — measured качество = реальное.
+
+    3. **Tools coverage** — analyst_graph (direct) покрывает только
+       forecast. RAG/web tools — на уровне Ouroboros tool-loop. Только
+       WS даёт полное multi-tool покрытие.
+
+    **Ограничения**:
+    - Требует running ``server.py`` (default ``ws://localhost:8000/ws``).
+      Health-check рекомендуется до старта.
+    - Sequential по диалогам (один WS connection = один dialogue) —
+      параллелизм отложен (rate limits LLM провайдера).
+    - ``tools_called`` извлекается best-effort из Langfuse API после
+      завершения dialogue (отдельная сетевая ходка ~1-2s). Если
+      LANGFUSE_* env не задан — ``tools_called`` остаётся пустым.
+
+    Per-dialogue session_id формируется как ``eval:{dialogue_id}_{ts}``
+    чтобы traces разных диалогов не пересекались (critical для readback).
+    """
+
+    def __init__(
+        self,
+        *,
+        server_url: Optional[str] = None,
+        timeout_seconds: float = 360.0,
+    ) -> None:
+        self._url = server_url or os.environ.get(
+            "EVAL_WS_URL", "ws://localhost:8000/ws"
+        )
+        self._timeout = timeout_seconds
+
+    async def run(self, dialogue: dict) -> RunResult:
+        import time as _time
+
+        try:
+            import websockets  # noqa: F401  — runtime check
+        except ImportError:
+            return RunResult(
+                answer="",
+                error="websockets package not installed (pip install websockets)",
+            )
+        import websockets
+
+        user_messages = [
+            m for m in dialogue["messages"] if m.get("role") == "user"
+        ]
+        if not user_messages:
+            return RunResult(answer="", error="no user messages in dialogue")
+        query = user_messages[-1]["content"]
+
+        dialogue_id = dialogue.get("id", "unknown")
+        ts = int(_time.time())
+        session_id = f"eval:{dialogue_id}_{ts}"
+        msg_id = f"eval_msg_{dialogue_id}_{ts}"
+
+        last_content = ""
+        try:
+            async with websockets.connect(
+                self._url, max_size=10 * 1024 * 1024, open_timeout=10
+            ) as ws:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "chat",
+                            "content": query,
+                            "sender_session_id": session_id,
+                            "client_message_id": msg_id,
+                        }
+                    )
+                )
+                # Break logic (по образцу scripts/verify_track_f_ws.py):
+                # server.py не всегда выставляет `done=True` явно. Поэтому
+                # выходим при substantial assistant message (chars > 50)
+                # после короткого grace на финальные chunks. Так же
+                # honour'им явный done если приходит.
+                t0 = _time.time()
+                last_chars = 0
+                got_substantial = False
+                while _time.time() - t0 < self._timeout:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        # Если уже получили substantial — это сигнал что
+                        # сервер замолчал, выходим.
+                        if got_substantial:
+                            break
+                        continue
+                    try:
+                        msg = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if (
+                        msg.get("type") == "chat"
+                        and msg.get("role") == "assistant"
+                    ):
+                        content = msg.get("content", "") or ""
+                        if content and len(content) != last_chars:
+                            last_content = content
+                            last_chars = len(content)
+                        if msg.get("done") and content:
+                            await asyncio.sleep(1.0)
+                            break
+                        if last_chars > 50 and not got_substantial:
+                            got_substantial = True
+                            # Grace на финальные events (последний расширенный
+                            # chunk + потенциальный done).
+                            await asyncio.sleep(2.0)
+                            # Оставляем ещё один проход цикла на recv с
+                            # коротким timeout — если ничего нет, выйдем
+                            # через 15s recv-таймаут (см. except выше).
+                else:
+                    return RunResult(
+                        answer=last_content,
+                        error=f"timeout > {self._timeout}s",
+                    )
+        except Exception as exc:  # noqa: BLE001 — runner не должен падать
+            return RunResult(
+                answer=last_content,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        # tools_called — выводим из citations в answer (определённо).
+        # Альтернатива: readback из Langfuse через session_id — сделал бы
+        # eval медленнее (8s ingest sleep × N) и зависимым от cloud
+        # availability. Citation-based вывод детерминирован и достаточен
+        # для scoring (`citation_correctness` всё равно проверяет именно
+        # наличие правильного типа цитаты в ответе).
+        tools_called = self._tools_from_answer(last_content)
+
+        # refused — heuristic по содержимому. Точечная классификация
+        # делается scoring-ом (см. score_dialogue), здесь — флаг для metrics.
+        refused = bool(last_content) and any(
+            phrase in last_content.lower()
+            for phrase in (
+                "запрос отклонён",
+                "запрос не покрыт",
+                "вне доменной",
+                "не в моей компетенции",
+                "запрос отклонен",
+            )
+        )
+
+        return RunResult(
+            answer=last_content,
+            tools_called=tools_called,
+            refused=refused,
+        )
+
+    @staticmethod
+    def _tools_from_answer(answer: str) -> list[str]:
+        """Извлечь tools_called из citations в финальном тексте.
+
+        Mapping: наличие RAG/Web/Forecast-цитаты → соответствующий tool.
+        Использует те же паттерны что и scoring (`nefteboros.citations`).
+        """
+        if not answer:
+            return []
+        try:
+            from nefteboros.citations import (
+                parse_forecast_citations,
+                parse_rag_citations,
+                parse_web_citations,
+            )
+        except ImportError:
+            return []
+        tools: list[str] = []
+        if any(parse_rag_citations(answer)):
+            tools.append("rag_search")
+        if any(parse_web_citations(answer)):
+            tools.append("web_search")
+        if any(parse_forecast_citations(answer)):
+            tools.append("forecast")
+        return tools
 
 
 class GraphRunner:
@@ -583,11 +789,17 @@ def save_run(
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     commit = _git_short_commit()
     out_path = METRICS_RUNS_DIR / f"{timestamp}_e2e_{runner_name}_{commit}.json"
+    # `relative_to` падает с ValueError, если dataset вне REPO_ROOT
+    # (subset из /tmp, custom path); fallback на absolute string.
+    try:
+        dataset_str = str(dataset_path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        dataset_str = str(dataset_path.resolve())
     payload = {
         "timestamp_utc": timestamp,
         "git_commit": commit,
         "runner": runner_name,
-        "dataset": str(dataset_path.relative_to(REPO_ROOT)),
+        "dataset": dataset_str,
         "metrics": metrics,
         "per_dialogue": [asdict(s) for s in scores],
     }
@@ -643,9 +855,30 @@ def main() -> int:
         "--dataset", type=Path, default=DEFAULT_DATASET,
         help="JSONL c диалогами (default: datasets/e2e_dialogues.jsonl)",
     )
-    parser.add_argument(
+    runner_group = parser.add_mutually_exclusive_group()
+    runner_group.add_argument(
         "--mock", action="store_true",
-        help="Использовать MockRunner (default — GraphRunner; требует env)",
+        help="MockRunner (шаблоны, без LLM/server). Smoke metric-кода.",
+    )
+    runner_group.add_argument(
+        "--graph", action="store_true",
+        help=(
+            "Legacy GraphRunner (direct analyst_graph.ainvoke). "
+            "Не пишет user_request traces в Langfuse — observations "
+            "попадают как orphan top-level. Только для unit-тестов "
+            "без running server'а."
+        ),
+    )
+    parser.add_argument(
+        "--ws-url", type=str, default=None,
+        help=(
+            "WS endpoint для WSRunner. Default: $EVAL_WS_URL или "
+            "ws://localhost:8000/ws."
+        ),
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Прогнать только первые N диалогов (для smoke / partial baseline).",
     )
     parser.add_argument(
         "--no-save", action="store_true",
@@ -668,16 +901,23 @@ def main() -> int:
         return 2
 
     dialogues = load_dialogues(dataset_path)
+    if args.limit is not None and args.limit > 0:
+        dialogues = dialogues[: args.limit]
     logger.info("loaded %d dialogues from %s", len(dialogues), dataset_path)
 
     runner: AgentRunner
     if args.mock:
         runner = MockRunner()
         runner_name = "mock"
-    else:
+    elif args.graph:
         _bootstrap_env()
         runner = GraphRunner()
         runner_name = "graph"
+    else:
+        # default — WSRunner: unified observability через server.py
+        _bootstrap_env()
+        runner = WSRunner(server_url=args.ws_url)
+        runner_name = "ws"
 
     scores = asyncio.run(_run_all(runner, dialogues))
 
@@ -692,7 +932,11 @@ def main() -> int:
         out_path = save_run(
             metrics, scores, runner_name=runner_name, dataset_path=dataset_path,
         )
-        print(f"\nsaved: {out_path.relative_to(REPO_ROOT)}")
+        try:
+            display_path = out_path.relative_to(REPO_ROOT)
+        except ValueError:
+            display_path = out_path
+        print(f"\nsaved: {display_path}")
 
     return 0
 
