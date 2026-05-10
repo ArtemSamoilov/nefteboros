@@ -266,3 +266,52 @@ def test_rule_ordering_horizon_beats_asset() -> None:
     intent = classify_intent("прогноз WTI на 24 месяца")
     assert intent.type == IntentType.OUT_OF_SCOPE
     assert intent.matched_rule == "rule_3_horizon"
+
+
+# =============================================================================
+# Scenario detection — bear/base/bull triggers (Track A v2.1, ADR-0024)
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Дай прогноз цены Brent на 3 месяца с разбивкой по сценариям bear/base/bull",
+        "Стресс-тест Urals на 6 месяцев",
+        "Дай оптимистичный сценарий по WTI",
+        "Медвежий и бычий сценарий по brent",
+        "пессимистичный прогноз газа TTF",
+        "разбивка по сценариям прогноза brent",
+    ],
+)
+def test_scenario_triggers_yield_three_scenarios(query: str) -> None:
+    """Запросы с scenario-триггерами → forecast_scenarios=['bear','base','bull']
+    (порядок важен: bear→base→bull для UX в synthesize)."""
+    intent = classify_intent(query)
+    assert intent.forecast_scenarios == ["bear", "base", "bull"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Прогноз Brent на 3 месяца",
+        "Какая цена нефти?",
+        "Прогноз газа TTF",
+        "Урал нефть прогноз",
+    ],
+)
+def test_no_scenario_triggers_default_base_only(query: str) -> None:
+    """Запросы без scenario-триггеров → ['base'] (default single-scenario).
+    Backward-compat: forecast_call делает один вызов как раньше."""
+    intent = classify_intent(query)
+    assert intent.forecast_scenarios == ["base"]
+
+
+def test_scenario_triggers_dont_change_intent_type() -> None:
+    """Scenario-триггер не должен ломать routing — intent.type выбирается
+    asset-правилами, scenarios — orthogonal dimension."""
+    intent = classify_intent("Brent с разбивкой по сценариям bear/base/bull")
+    assert intent.type == IntentType.FORECAST_SIMPLE
+    assert intent.matched_rule == "rule_1_brent_explicit"
+    assert intent.forecast_assets == ["brent"]
+    assert intent.forecast_scenarios == ["bear", "base", "bull"]

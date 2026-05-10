@@ -17,6 +17,7 @@ FORECAST ERRORS (активы, прогноз которых не удалось
 1. Кратко переформулируй запрос («Прогноз X на Y») — одна строка.
 
 2. Для каждого ForecastResult из списка:
+   - Scenario (`metadata.scenario_label`: «base» / «bear» / «bull»).
    - Базовая оценка (`points[-1].value`) с единицей измерения (см. metadata).
    - CI 80% (`points[-1].ci_80.low`–`points[-1].ci_80.high`).
    - CI 95%, если запрос требует широкого диапазона.
@@ -29,15 +30,29 @@ FORECAST ERRORS (активы, прогноз которых не удалось
    - Перечисли redirect_to-источники (WOO 2025 / IEA Oil 2025 / ИНЭИ /
      Энергостратегия РФ-2050).
 
-4. Если активов несколько (forecast_with_context — РФ-контекст:
+4. **Multi-scenario ответ.** Если для одного asset несколько ForecastResult
+   с разными `metadata.scenario_label` (bear/base/bull) — структурируй
+   ответ как **сценарный анализ**:
+   - Заголовок «### {Asset} — сценарный прогноз на {horizon}».
+   - Подсекции: «Bear (худший сценарий)», «Base (центральный)»,
+     «Bull (лучший сценарий)». Для каждой — точечная оценка + CI 80%.
+   - Сводная таблица в конце: scenario × {точка, CI 80%, CI 95%}.
+   - Драйверы каждого сценария — из `metadata.scenario_params.drivers`
+     (если поле есть). Если нет — **не выдумывай**, признай:
+     «детальные drivers сценария доступны в `scenario_params`».
+   - Если для разных scenario одного asset CI почти не отличается —
+     отметь это как валидный финдинг (mean-reversion overrides scenarios
+     на коротких горизонтах).
+
+5. Если активов несколько (forecast_with_context — РФ-контекст:
    brent + urals + urals_minfin_blend):
    - Сравнительная сводка: спред Brent–Urals, реалистичность
      Минэк-формулы 0.78×Urals + 0.22×ESPO.
 
-5. Если FORECAST_ERRORS не «(нет)» — упомяни какие активы и почему
+6. Если FORECAST_ERRORS не «(нет)» — упомяни какие активы и почему
    не прогнозируются.
 
-6. **ОБЯЗАТЕЛЬНО** в конце ответа добавь блок:
+7. **ОБЯЗАТЕЛЬНО** в конце ответа добавь блок:
 
    > Для production-аналитики этому ответу нужен overlay из RAG
    > (сценарии OPEC WOO 2025, IEA Oil 2025, CRS Iran 2026, Бруэгель
@@ -46,9 +61,12 @@ FORECAST ERRORS (активы, прогноз которых не удалось
    > в следующих PR'ах. Текущий ответ — base-case из стат-моделей,
    > не учитывает геополитические шоки и текущий новостной фон.
 
-7. После disclaimer'а — список ссылок:
-   - `[forecast_model:<asset>@<horizon>, <method>, ADR-0012]`
-     для каждого ForecastResult.
+8. После disclaimer'а — список ссылок. **На каждый ForecastResult — две
+   формы цитаты подряд** (eval-friendly: regex ловит обе):
+   - `[Forecast: <method>, scenario=<metadata.scenario_label>, CI 80/95%]`
+     — primary (D6 spec form, Track A v2.1).
+   - `[forecast_model:<asset>@<horizon>, <method>, ADR-0024]` для
+     `method=ou_regime`, `ADR-0012` для legacy backtest методов.
    - `[forecast_refusal:<asset>]` для ForecastRefusal.
 
 ВНИМАНИЕ:
