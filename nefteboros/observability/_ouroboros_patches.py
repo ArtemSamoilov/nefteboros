@@ -323,6 +323,18 @@ def _patch_handle_task() -> None:
                     root_span.update(output=output_payload)
                 except Exception:  # noqa: BLE001
                     pass
+                # Explicit flush: Langfuse 4.x SDK батчит spans асинхронно
+                # (по time/size triggers). Короткие диалоги (refusal без
+                # tools, ~1-7s) закрывают WS connection раньше, чем batch
+                # отправляется → trace теряется в Langfuse. Длинные
+                # multi-tool диалоги работают за счёт периодического
+                # flush'а внутри batch window. Явный flush здесь
+                # гарантирует доставку для **всех** диалогов независимо
+                # от длительности. Cost: ~100-300ms к latency per request.
+                try:
+                    client.flush()
+                except Exception:  # noqa: BLE001 — flush никогда не ломает request
+                    pass
                 return result
         except Exception:
             logger.exception(
