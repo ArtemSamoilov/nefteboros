@@ -55,12 +55,18 @@ class Intent(BaseModel):
 
     `matched_rule` — для debug / тестов; сообщает какое именно правило
     отработало в classify (полезно при триаже false-positive/false-negative).
+
+    `forecast_scenarios` — список scenario-имён для forecast_call. Default
+    ``["base"]`` (single base scenario). Multi-scenario запросы
+    («сценарии bear/base/bull», «стресс-тест») триггерят
+    ``["bear", "base", "bull"]`` — forecast_call делает N×M вызовов.
     """
 
     model_config = ConfigDict(frozen=True)
 
     type: IntentType
     forecast_assets: list[str] = Field(default_factory=list)
+    forecast_scenarios: list[str] = Field(default_factory=lambda: ["base"])
     forecast_horizon: Optional[Horizon] = None
     forecast_method: Optional[ModelMethod] = None
     refuse_reason: Optional[str] = None

@@ -4,9 +4,12 @@ Lazy import nefteboros.forecast.api.forecast, чтобы граф можно б�
 импортировать без heavy domain stack (pandas/numpy/statsmodels/yfinance/
 sklearn) — например, в Ouroboros CI.
 
-Sequential по активам. Параллелизация (asyncio.gather) — отложена в
-integration PR (когда будут параллельные RAG/web узлы и общий
-perf-проход имеет смысл).
+Sequential по (asset, scenario) парам. Multi-scenario запросы
+(intent.forecast_scenarios=['bear','base','bull']) → N×M вызовов:
+каждый asset прогнозируется во всех запрошенных сценариях, результаты
+собираются в плоский список (synthesize группирует по asset/scenario).
+Параллелизация (asyncio.gather) — отложена в integration PR (когда будут
+параллельные RAG/web узлы и общий perf-проход имеет смысл).
 """
 
 from __future__ import annotations
@@ -52,6 +55,10 @@ async def forecast_call(state: GraphState) -> dict[str, Any]:
     horizon = state.intent.forecast_horizon
     horizon_str = horizon.value if horizon is not None else _DEFAULT_HORIZON
 
+    # ['base'] если scenarios не указаны (single-scenario default).
+    # Multi-scenario запросы дают ['bear','base','bull'] от classify_intent.
+    scenarios = state.intent.forecast_scenarios or ["base"]
+
     # Lazy import — heavy stack
     from nefteboros.forecast.api import forecast as forecast_fn
     from nefteboros.forecast.schema import ForecastRefusal, ForecastResult
@@ -60,27 +67,31 @@ async def forecast_call(state: GraphState) -> dict[str, Any]:
     errors: list[str] = []
 
     for asset in state.intent.forecast_assets:
-        try:
-            result = forecast_fn(
-                asset=asset,
-                horizon=horizon_str,
-                method=state.intent.forecast_method,
-            )
-            results.append(result)
-        except (ValueError, KeyError, RuntimeError) as exc:
-            err_msg = (
-                f"forecast({asset!r}, {horizon_str!r}) → "
-                f"{type(exc).__name__}: {exc}"
-            )
-            logger.warning(err_msg)
-            errors.append(err_msg)
-        except Exception as exc:  # noqa: BLE001 — graph node must not crash
-            err_msg = (
-                f"forecast({asset!r}, {horizon_str!r}) → "
-                f"unexpected {type(exc).__name__}: {exc}"
-            )
-            logger.exception("forecast_call: unexpected error for %s", asset)
-            errors.append(err_msg)
+        for scenario in scenarios:
+            try:
+                result = forecast_fn(
+                    asset=asset,
+                    horizon=horizon_str,
+                    scenario=scenario,
+                    method=state.intent.forecast_method,
+                )
+                results.append(result)
+            except (ValueError, KeyError, RuntimeError) as exc:
+                err_msg = (
+                    f"forecast({asset!r}, {horizon_str!r}, scenario={scenario!r}) → "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                logger.warning(err_msg)
+                errors.append(err_msg)
+            except Exception as exc:  # noqa: BLE001 — graph node must not crash
+                err_msg = (
+                    f"forecast({asset!r}, {horizon_str!r}, scenario={scenario!r}) → "
+                    f"unexpected {type(exc).__name__}: {exc}"
+                )
+                logger.exception(
+                    "forecast_call: unexpected error for %s/%s", asset, scenario
+                )
+                errors.append(err_msg)
 
     return {
         "forecast_results": results,

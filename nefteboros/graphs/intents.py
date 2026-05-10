@@ -56,6 +56,24 @@ _RUSSIAN_GAS_PATTERNS = [
     r"\b(?:рубл\w*|руб\.?)\s*(?:за|/)\s*(?:тыс|1000|м[³3])\b",
 ]
 
+# Multi-scenario триггеры — bear/base/bull через forecast(scenario=) API
+# (Track A, ADR-0024). Earliest-match-wins: если query содержит любой из
+# триггеров — forecast_call делает N×M вызовов (assets × ['bear','base','bull']).
+# Без триггера — single 'base' scenario (default).
+_SCENARIO_TRIGGERS = [
+    r"\bсценар(?:и[йяюие]|ев)\b",        # «по сценариям», «3 сценария», «сценарный»
+    r"\bbear\b",
+    r"\bbull\b",
+    r"\bстресс[\s\-]?тест\w*\b",
+    r"\bхудш(?:ий|его)\s+случа\w*\b",   # «худший случай»
+    r"\bлучш(?:ий|его)\s+случа\w*\b",   # «лучший случай»
+    r"\bоптимистичн\w*\b",
+    r"\bпессимистичн\w*\b",
+    r"\bразбивк[аи]\s+по\s+сценари\w*\b",
+    r"\bмедвеж[ьи]\w*\b",                # «медвежий» сценарий
+    r"\bбыч[ьи]\w*\b",                   # «бычий» сценарий
+]
+
 # Rule #1 РФ-контекст триггеры
 _RU_CONTEXT_KEYWORDS = [
     r"\bминфин\w*\b",
@@ -194,6 +212,18 @@ def extract_horizon(query: str) -> tuple[Optional[Horizon], Optional[str]]:
     return Horizon(f"{nearest}m"), None
 
 
+def _extract_scenarios(query: str) -> list[str]:
+    """Список scenario для forecast_call. ['bear','base','bull'] если query
+    содержит scenario-триггер, иначе ['base'].
+
+    Порядок имеет смысл: bear → base → bull читается «диапазон от худшего
+    к лучшему», LLM в synthesize структурирует ответ соответственно.
+    """
+    if _matches_any(query, _SCENARIO_TRIGGERS):
+        return ["bear", "base", "bull"]
+    return ["base"]
+
+
 def classify_intent(query: str) -> Intent:
     """Rule-based классификация запроса в Intent.
 
@@ -233,12 +263,14 @@ def classify_intent(query: str) -> Intent:
     has_oil = _matches_any(q, _OIL_KEYWORDS)
     has_gas = _matches_any(q, _GAS_KEYWORDS)
     has_ru_context = _matches_any(q, _RU_CONTEXT_KEYWORDS)
+    scenarios = _extract_scenarios(q)
 
     # Rule #1: WTI explicit
     if _matches_any(q, _WTI_KEYWORDS):
         return Intent(
             type=IntentType.FORECAST_SIMPLE,
             forecast_assets=["wti"],
+            forecast_scenarios=scenarios,
             forecast_horizon=horizon,
             matched_rule="rule_1_wti",
         )
@@ -248,6 +280,7 @@ def classify_intent(query: str) -> Intent:
         return Intent(
             type=IntentType.FORECAST_SIMPLE,
             forecast_assets=["brent"],
+            forecast_scenarios=scenarios,
             forecast_horizon=horizon,
             matched_rule="rule_1_brent_explicit",
         )
@@ -257,6 +290,7 @@ def classify_intent(query: str) -> Intent:
         return Intent(
             type=IntentType.FORECAST_WITH_CONTEXT,
             forecast_assets=["brent", "urals", "urals_minfin_blend"],
+            forecast_scenarios=scenarios,
             forecast_horizon=horizon,
             matched_rule="rule_1_oil_ru_context",
         )
@@ -266,6 +300,7 @@ def classify_intent(query: str) -> Intent:
         return Intent(
             type=IntentType.FORECAST_SIMPLE,
             forecast_assets=["ttf"],
+            forecast_scenarios=scenarios,
             forecast_horizon=horizon,
             matched_rule="rule_1_ttf",
         )
@@ -275,6 +310,7 @@ def classify_intent(query: str) -> Intent:
         return Intent(
             type=IntentType.FORECAST_SIMPLE,
             forecast_assets=["henry_hub"],
+            forecast_scenarios=scenarios,
             forecast_horizon=horizon,
             matched_rule="rule_1_henry_hub",
         )
@@ -284,6 +320,7 @@ def classify_intent(query: str) -> Intent:
         return Intent(
             type=IntentType.FORECAST_SIMPLE,
             forecast_assets=["henry_hub", "ttf"],
+            forecast_scenarios=scenarios,
             forecast_horizon=horizon,
             matched_rule="rule_1_gas_default",
         )
@@ -293,6 +330,7 @@ def classify_intent(query: str) -> Intent:
         return Intent(
             type=IntentType.FORECAST_SIMPLE,
             forecast_assets=["brent"],
+            forecast_scenarios=scenarios,
             forecast_horizon=horizon,
             matched_rule="rule_1_oil_default",
         )
