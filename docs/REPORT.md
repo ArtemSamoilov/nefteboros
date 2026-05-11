@@ -22,6 +22,8 @@
 
 ## 3. Технологии и обоснование
 
+**Принцип: независимость от внешних поставщиков.** Все ключевые компоненты — LLM, наблюдаемость, RAG-стек, веб-поиск — выбраны либо с открытыми весами, либо с возможностью переключения через переменные окружения. Развёртывание в защищённом контуре Сбера без зависимости от внешних провайдеров — правка ENV, не правка кода.
+
 **Состав LLM — GigaChat + Kimi K2 (через Hydra) + резервный AItunnel** ([ADR-0007](adr/0007-llm-providers.md)). Разные модели на разные роли, протокол транспорта независим от поставщика, совместим с API OpenAI.
 
 - **GigaChat-2-Max** — узел `llm_disambiguate` в `analyst_graph` ([ADR-0015](adr/0015-llm-disambiguate.md), `nefteboros/graphs/nodes/llm_disambiguate.py`): вызывается условным переходом, когда `classify_intent` на основе правил возвращает `matched_rule == "no_keyword_match"`. Структурированный JSON-вывод, перезаписывает `state.intent`. Модель Сбера применена там, где её сильные стороны в русскоязычной семантике дают наибольший выигрыш — на разрешении неоднозначности пользовательских запросов.
@@ -33,7 +35,13 @@
 
 **RAG — Chroma + BGE-M3 + крупные чанки** ([ADR-0016](adr/0016-embed-retrieve.md), [ADR-0011](adr/0011-chunking-and-tagging.md)). Мультиязычные эмбеддинги (1024d) — корпус RU/EN ≈ 41/59. Чанки крупные (целевой размер 3000 токенов) — Kimi-2.6 работает с длинным контекстом, мелкие чанки дают шум. PDF→Markdown — Marker. Корпус собран от таксономии вопросов, не «качаем всё» ([docs/corpus.md](corpus.md)).
 
+**Веб-поиск — фильтр TIER1/TIER2** ([ADR-0022](adr/0022-web-search-brave.md), [`nefteboros/search/tiers.py`](../nefteboros/search/tiers.py)). Brave Search API + post-filter по hostname: TIER1 — Reuters, Bloomberg, FT, WSJ, Argus Media, S&P Platts, IEA, OPEC, EIA, РБК, Ведомости, Интерфакс, ТАСС; TIER2 — CNBC, Forbes, Neftegaz.ru, Energyland; BLACKLIST (всегда выбрасываются) — Reddit, Quora, соцсети, Dzen, Pikabu, Medium. Полная замена списков через ENV (`NEFTEBOROS_WEB_TIER1_HOSTS=...` и т.д.). Определение языка (доля кириллицы ≥ 30% → RU, иначе EN) — выбирает соответствующий tier-1 пул.
+
 **LangGraph — детерминированный оркестратор.** Маршрутизация между прогнозом / RAG / веб-поиском — код с модульными тестами, не эвристический LLM-промпт. Системный промпт ([ADR-0019](adr/0019-system-prompt-analyst.md)) задаёт идентичность и форматы цитирования.
+
+**Наблюдаемость — Langfuse Cloud + JSON-трейс backup** ([ADR-0024-observability-langfuse](adr/0024-observability-langfuse.md), [`nefteboros/observability/`](../nefteboros/observability/)). Каждый узел графа автоматически попадает в трейс через `@observe`-обёртку при `add_node` (разделение: узлы — доменная логика, граф — провязка + наблюдаемость). Иерархия трейса `user_request → analyst_query → classify_intent → forecast_call → validate_citations` — рецензент видит полное дерево вызовов и может проверить, как агент пришёл к ответу (см. реальные кликабельные `trace_id` в [`examples/dialogues/`](../examples/dialogues/)). Токены / стоимость / задержка считаются через `log_llm_usage` с иерархией: наши `COST_RATES` для kimi-k2p6 и GigaChat-2-Max → fallback `ouroboros.pricing.estimate_cost` → null. Параллельно с Langfuse пишется JSON-трейс в `metrics/runs/<ts>/trace.jsonl` — backup для demo без Langfuse-аккаунта (`LANGFUSE_ENABLED=false`). Self-host Langfuse в защищённом контуре Сбера поддерживается одной переменной окружения (`LANGFUSE_HOST=...`).
+
+**Валидация цитат — RAG-валидатор реализован** ([`nefteboros/citations/`](../nefteboros/citations/)). Пост-валидатор после узла `synthesize` проверяет, что каждая ссылка вида `[Отчёт OPEC MOMR, март 2025]` соответствует чанку, реально извлечённому RAG'ом (regex match с метаданными чанка). Если ссылка не подтверждена — узел `validate_citations` помечает её как потенциальную галлюцинацию.
 
 ## 4. Ограничения
 
@@ -54,7 +62,18 @@
 
 ## 6. Метрики качества
 
-Сквозная оценка: 100 диалогов, 5 категорий ТЗ §4.6 + многоинструментные + состязательные + хеджирование. Метрики: **success_rate** (агент ответил, не упал), **citation_rate** (корректная цитата), **structure_score** (ключевые выводы + цифры + цитаты + диапазон для цен), **refusal_correctness** (корректный отказ на запрос вне компетенции).
+**Принцип: каждый подграф измеряем.** Не единственная сквозная метрика, а измеримость на уровне каждого компонента — отдельные скрипты оценки и датасеты для маршрутизации, RAG, прогноза, цитирования и end-to-end. Подробное описание метрик в каждом модуле — [`docs/modules/`](modules/).
+
+| Подграф | Метрики | Скрипт оценки | Датасет |
+|---|---|---|---|
+| Маршрутизация (intent classifier) | accuracy, F1 по классам | [`scripts/eval/eval_intent_classifier.py`](../scripts/eval/eval_intent_classifier.py) | [`datasets/intent_classifier.jsonl`](../datasets/intent_classifier.jsonl) |
+| RAG | hit@k, MRR, recall | [`scripts/eval/eval_rag.py`](../scripts/eval/eval_rag.py) | [`datasets/rag_eval/`](../datasets/rag_eval/) |
+| Прогноз (OU regime) | MAPE, RMSE, покрытие CI | [`scripts/eval/eval_ou.py`](../scripts/eval/eval_ou.py) + [`eval_forecast.py`](../scripts/eval/eval_forecast.py) | walk-forward 5 лет ([`datasets/forecast_manual/`](../datasets/forecast_manual/)) |
+| Цитирование | precision, recall, false-attribution | [`scripts/eval/eval_citations.py`](../scripts/eval/eval_citations.py) (заглушка, план v2.4) | — |
+| Веб-поиск | косвенно через E2E (выделенный — в плане v2.4) | — | — |
+| End-to-end | success, citation, structure, refusal | [`scripts/eval/eval_e2e.py`](../scripts/eval/eval_e2e.py) | [`datasets/e2e_dialogues.jsonl`](../datasets/e2e_dialogues.jsonl) |
+
+**Сквозная оценка (E2E):** 100 диалогов, 5 категорий ТЗ §4.6 + многоинструментные + состязательные + хеджирование. Метрики: **success_rate** (агент ответил, не упал), **citation_rate** (корректная цитата), **structure_score** (ключевые выводы + цифры + цитаты + диапазон для цен), **refusal_correctness** (корректный отказ на запрос вне компетенции).
 
 | Метрика | v2.0.0 baseline (100 диалогов) | v2.3.5 (текущий) |
 |---|---:|---:|
@@ -63,4 +82,6 @@
 | structure_score | 0.528 | <!-- TODO: координатор подставит из docs/eval-results-v2.3.5.md (сессия D) --> |
 | refusal_correctness | 0.947 | <!-- TODO: координатор подставит из docs/eval-results-v2.3.5.md (сессия D) --> |
 
-Прогноз — отдельный walk-forward бэктест на истории 5 лет (помесячное скользящее, n ≈ 33 на ячейку): Brent bear MAPE 6-13% (промышленного уровня), base/bull на 12 месяцев MAPE 30-50% (намеренно — параметры под режим шока). Разбивка по режимам — [ADR-0024-ou-regime-forecast §A5/A8](adr/0024-ou-regime-forecast.md).
+**Прогноз — walk-forward бэктест на истории 5 лет** (помесячное скользящее, n ≈ 33 на ячейку): Brent bear MAPE 6-13% (промышленного уровня), base/bull на 12 месяцев MAPE 30-50% (намеренно — параметры под режим шока). Разбивка по режимам — [ADR-0024-ou-regime-forecast §A5/A8](adr/0024-ou-regime-forecast.md).
+
+**Известное ограничение:** `eval_citations.py` — заглушка (`raise NotImplementedError`), регрессионный тест offline отсутствует. Метрика `cite=0.181` в E2E-таблице получена через E2E-валидатор, не через выделенный citations validator. Полная реализация — в плане v2.4 (Track D6).
