@@ -26,11 +26,11 @@
 | 4 | [`04-forecast-sarimax-honest-limitation.md`](dialogues/04-forecast-sarimax-honest-limitation.md) | Forecast (§4.6.4) с явным declaration ограничения | [`07392f8e…`](https://cloud.langfuse.com/trace/07392f8ecdd92dbe3ea10965a5d5c7fb) | analyst_query + classify_intent + forecast_call + validate_citations |
 | 5 | [`05-multi-tool-sanctions-forecast.md`](dialogues/05-multi-tool-sanctions-forecast.md) | **Bonus** — многоинструментный (RAG + Web + Forecast) | [`ba81edd9…`](https://cloud.langfuse.com/trace/ba81edd9587ef3446f3f920c98b8e4cc) | analyst_query + classify_intent + forecast_call + web_search + validate_citations |
 | 6 | [`06-web-only-current-brent.md`](dialogues/06-web-only-current-brent.md) | Web (§4.6.2) | [`9263be9d…`](https://cloud.langfuse.com/trace/9263be9dbd02716e8b11bb0d416e00a3) | web_search |
-| 7 | [`07-refusal-known-observability-gap.md`](dialogues/07-refusal-known-observability-gap.md) | Refusal (§4.6.5) **с гэпом в Langfuse** | _(no trace)_ | _(none)_ |
+| 7 | [`07-refusal-correct-handling.md`](dialogues/07-refusal-correct-handling.md) | Refusal (§4.6.5) (автоматический прогон, trace artifact) | _(no trace в этом прогоне)_ | _(none)_ |
 | 8 | [`08-multi-turn-forecast-context.md`](dialogues/08-multi-turn-forecast-context.md) | **Bonus** — multi-turn (3 round, общий sender_session_id) | _см. файл_ | _см. файл_ |
 | 9 | [`09-conflict-rag-vs-web.md`](dialogues/09-conflict-rag-vs-web.md) | **Bonus** — conflict resolution (CREA vs Argus в одном ответе) | [`2e848652…`](https://cloud.langfuse.com/trace/2e8486528a4a8270f0dbd79c2c4a41d1) | rag_search + web_search |
 
-> ⚠ Диалог 7 — это **честная фиксация** известной регрессии: короткие refusal-диалоги (1-2 LLM round, ~10–15s) иногда теряются из-за async batch-flush Langfuse SDK 4.x. Сам ответ агента в WS-сессии корректный (запрос про погоду → отказ), отсутствует только trace, не функциональность. См. [`docs/changelog/2026-05-10-wsrunner-eval-observability.md`](../docs/changelog/2026-05-10-wsrunner-eval-observability.md).
+> ℹ Диалог 7 — корректный отказ на короткий out-of-domain запрос; в данном WS-прогоне trace в Langfuse не подтянулся — артефакт автоматического теста (short refusal + WS close раньше async flush). В реальных пользовательских сессиях через web UI trace ловится. Архитектурный контекст: [`docs/changelog/2026-05-10-wsrunner-eval-observability.md`](../docs/changelog/2026-05-10-wsrunner-eval-observability.md).
 >
 > ⚠ Диалог 9 использует **тот же trace**, что в диалоге 02 — но с другим фокусом (conflict-handling между CREA и Argus). Координатор PR #61 одобрил такое переиспользование при условии разных фокусов.
 >

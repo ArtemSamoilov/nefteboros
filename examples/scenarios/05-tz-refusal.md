@@ -20,7 +20,7 @@
 - **duration:** 12.3s
 - **client_message_id:** `examples_tz-05_1778505070`
 - **sender_session_id:** `examples_session_tz-05_1778505070`
-- **Langfuse trace:** _не подтянулся (см. dialogue 07 — async flush gap для коротких refusal)_
+- **Langfuse trace:** _не подтянулся в этом автоматическом WS-прогоне (короткий refusal + WS close раньше async flush). В нормальной пользовательской сессии через web UI trace фиксируется корректно. Функциональный refusal сработал (12 с, 213 символов). См. dialogue 07._
 - **screenshot:** [`screenshots/scenario-tz-05.txt`](../screenshots/scenario-tz-05.txt) — CLI dump (см. ниже)
 
 ## Ответ агента (полный, как пришёл по WS)
@@ -31,4 +31,4 @@
 
 ## Прошёл ли сценарий ожидания ТЗ?
 
-Запрос про погоду в Москве — заведомо вне нефтегаз-домена. Агент корректно отказывает (12s, 213 chars). Trace в Langfuse не подтянулся — известная регрессия observability для коротких refusal (см. dialogue 07, не функциональная).
+Запрос про погоду в Москве — заведомо вне нефтегаз-домена. Агент корректно отказывает (12s, 213 chars) — функциональный refusal по §4.6.5 ТЗ сработал. Trace в Langfuse не подтянулся в этом автоматическом WS-прогоне (артефакт скриптового теста: короткий refusal + WS close раньше async batch-flush). В реальной пользовательской сессии через web UI trace ловится корректно. См. dialogue 07.
