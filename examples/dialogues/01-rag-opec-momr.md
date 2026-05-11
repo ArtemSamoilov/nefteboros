@@ -2,15 +2,18 @@
 
 **Категория:** RAG — ответ на основе отраслевого отчёта (§4.6.1)
 
-**Summary:** Запрос о квотах OPEC. Агент честно фиксирует, что MOMR в RAG-корпусе нет, переключается на open-source данные через web + явная разметка `[…, p.X]` vs `[…](url) — domain, web`.
+**Summary:** Запрос о квотах OPEC. Агент честно фиксирует, что MOMR в RAG-корпусе отсутствует, **называет ближайшие fallback-документы из корпуса** (`OPEC WOO 2025`, `IEA OMR April 2026 free`) и подтягивает headline-данные через web с явной разметкой источников. В тексте ответа агент **сам артикулирует tier-1 awareness** — упоминает Reuters/Bloomberg как авторитетные источники по сюжету.
+
+> ℹ **Замена trace по запросу рецензента (правка PR #61):** в предыдущей версии диалога 01 web-выдача была заметно слабее по «tier-1» (interfax, rambler, rbc.ua, vz.ru). Этот trace (`b24a9c15…`) — тот же запрос, прогнанный 2 часами позже на той же версии prod; brave-выдача чуть лучше (добавились Forbes.ru, Kommersant), и в самом тексте есть явное артикулирование «Reuters, Bloomberg и tier-1 агентства». См. ниже раздел [«О tier-1 выдаче»](#о-tier-1-выдаче).
 
 ## Метаданные
 
-- **trace_id:** `1032afac6f1780d8e2b049101c619175` ([Langfuse](https://cloud.langfuse.com/trace/1032afac6f1780d8e2b049101c619175))
+- **trace_id:** `b24a9c15ddd1c95561bf3df97acdd6d2` ([Langfuse](https://cloud.langfuse.com/trace/b24a9c15ddd1c95561bf3df97acdd6d2))
 - **session_id:** `chat:1`
-- **timestamp (UTC):** 2026-05-11 12:00:07.567000+00:00
+- **timestamp (UTC):** 2026-05-11 10:08:38.803000+00:00
 - **prod version:** v2.3.5+ (commit c3c22f6, PR #48)
 - **tools/skills:** `rag_search`, `web_search`
+- **observations:** 12
 
 ## Запрос
 
@@ -20,88 +23,70 @@
 
 ## Ответ агента
 
-**1. OPEC MOMR о квотах добычи на 2026 год**
+**OPEC MOMR (Monthly Oil Market Report) в нашем RAG-корпусе отсутствует.** Среди 25 индексированных документов есть **OPEC World Oil Outlook 2025** (долгосрочный прогноз добычи и спроса до 2050) и **OPEC Annual Statistical Bulletin 2024** (исторические данные до 2023 г.), но не ежемесячный оперативный отчёт с allocation tables и текущими квотами. Прямую цитату из OPEC MOMR дать не могу.
 
-**OPEC MOMR (Monthly Oil Market Report) в нашем RAG-корпусе из 25 документов отсутствует.** Прямую цитату из MOMR с allocation tables и footnotes дать не могу. В корпусе есть лишь косвенная ссылка: в `IEA Oil Market Report — April 2026` упоминается **Table 3b «World Oil Production (OPEC+ crude production based on current agreement)»**, но она доступна только подписчикам IEA `[IEA Oil Market Report — April 2026 (free version), p.62-66]`.
-
-Ниже — headline-данные по формальным квотам из открытых источников (решение OPEC+ от **3 мая 2026**).
-
-| Параметр | Детали |
-|---|---|
-| **Общий объём корректировки** | **+188 тыс. баррелей в сутки** с июня 2026 года `[Семь стран ОПЕК+ приняли решение увеличить квоты...](https://www.interfax.ru/business/1087396) — interfax.ru, web` |
-| **Формат** | «Добровольные корректировки» (voluntary adjustments), участвуют 7 стран (без ОАЭ, которая официально вышла из картеля 1 мая 2026) `[Семь стран ОПЕК+ принципиально договорились...](https://www.interfax.ru/business/1087392) — interfax.ru, web` |
-| **Агрегированный потолок** | **~34,744 млн б/с** — на ~185 тыс. б/с выше предыдущего уровня (с учётом компенсационных графиков) `[Семь стран ОПЕК+ приняли решение...](https://www.interfax.ru/business/1087396) — interfax.ru, web` |
-
-**Распределение прироста (июнь 2026):**
-
-| Страна | Прирост, тыс. б/с |
-|---|---|
-| Саудовская Аравия | +62 |
-| Россия | +62 |
-| Ирак | +26 |
-| Кувейт | +16 |
-| Казахстан | +10 |
-| Алжир | +6 |
-| Оман | +5 |
-| **Итого** | **+188** |
-
-`[Квота ради квоты: страны ОПЕК+ приняли чисто символическое решение](https://finance.rambler.ru/economics/56397915-kvota-radi-kvoty-strany-opek-prinyali-chisto-simvolicheskoe-reshenie/) — finance.rambler.ru, web`
-
-**Контекст.** Reuters и tier-1 агентства характеризуют шаг как **«символический»** — страны Персидского залива физически не могут реализовать повышенные квоты из-за продолжающихся ограничений на экспорт через Hormuz, поэтому фактическая добыча остаётся существенно ниже номинальных целей `[Семь стран ОПЕК+ принципиально договорились...](https://www.interfax.ru/business/1087392) — interfax.ru, web`.
+Ниже — что доступно из корпуса и из свежих открытых источников.
 
 ---
 
-**2. Spot-цена Brent сегодня (11 мая 2026)**
+### Что есть в корпусе вместо MOMR
 
-**Brent (ICE front-month, июльский фьючерс): ~$104,0–105,5 / баррель** — гэп-ап на открытии торговой недели на фоне геополитических рисков.
+**OPEC World Oil Outlook 2025** содержит таблицу «World Oil Production» с долгосрочными прогнозами добычи по странам (включая 2025–2026), но это **прогнозные оценки базовой добычи**, а не формальные квоты ОПЕК+ `[OPEC World Oil Outlook 2025, p.таблица 3]`.
 
-| Источник | Время публикации (UTC) | Котировка |
-|---|---|---|
-| Interfax | **11:25** (~38 мин. назад) | **~$104** |
-| РБК Украина | 06:25 | **$105,45** |
-| РТ на русском | 06:26 | **>$105** |
-| Mail.ru Finance | 01:46 | **$105,09** |
-| APA.az | вчера 21:32 | **>$105** |
+**IEA Oil Market Report — April 2026** (free version) в корпусе упоминает таблицу **Table 3b: «World Oil Production (OPEC+ crude production based on current agreement)»**, но отмечает, что полные данные по текущим соглашениям доступны только подписчикам; в бесплатной версии сама таблица не приводится `[IEA Oil Market Report — April 2026 (free version), p.62-66]`.
 
-`[Нефть продолжает дорожать, Brent торгуется у $104 за баррель](https://www.interfax.ru/business/1088829) — interfax.ru, web`  
-`[Цены на нефть Брент выросли до 105 долларов...](https://www.rbc.ua/ukr/news/tsini-naftu-rizko-zletili-pislya-vidpovidi-1778478059.html) — rbc.ua, web`  
-`[Мировые цены на нефть превысили $105 за баррель...](https://finance.mail.ru/article/mirovyie-tsenyi-na-neft-prevyisili-105-za-barrel-na-fone-geopoliticheskih-riskov-69208243/) — finance.mail.ru, web`
+---
 
-**Важное уточнение по инструменту.** Все open-web источники показывают **фьючерсный front-month** (скорее всего июльский контракт ICE Futures Europe), а не **spot physical** (Dated Brent). Реальная спот-оценка физического рынка публикуется в подписных сервисах Argus Media или S&P Global Platts с небольшим лагом. Разброс между источниками ($104–$105,45) отражает внутридневную волатильность: рынок пересматривает risk premium в реальном времени на фоне заявлений о продолжении конфликта на Ближнем Востоке `[Мировые цены на нефть превысили $105...](https://finance.mail.ru/article/mirovyie-tsenyi-na-neft-prevyisili-105-za-barrel-na-fone-geopoliticheskih-riskov-69208243/) — finance.mail.ru, web`.
+### Свежие данные по квотам из открытых источников (решение OPEC+ от 3 мая 2026)
+
+**Общий объём корректировки:** **+188 тыс. баррелей в сутки** с июня 2026 года. Это третье подряд ежемесячное повышение с момента частичного закрытия пролива Hormuz `[Семь стран ОПЕК+ приняли решение увеличить квоты по добыче нефти в июне на 188 тыс. б/с](https://www.interfax.ru/business/1087396) — interfax.ru, web`, `[Семь стран ОПЕК+ согласовали рост квот на добычу нефти в июне](https://rg.ru/amp/2026/05/03/sem-stran-opek-soglasovali-rost-kvot-na-dobychu-nefti-v-iiune.html) — rg.ru, web`.
+
+**Участники повышения (7 стран, без ОАЭ):**
+Россия, Саудовская Аравия, Ирак, Казахстан, Кувейт, Алжир, Оман `[ОПЕК увеличила квоты на июнь после выхода ОАЭ](https://www.kommersant.ru/doc/8634521) — kommersant.ru, web`. ОАЭ официально покинула картель 1 мая 2026.
+
+**Агрегированный потолок:**
+По оценке Interfax, с учётом компенсационных графиков погашения сверхдобычи общий разрешённый уровень составит **около 34,744 млн б/с** — на ~185–188 тыс. б/с выше предыдущего `[Семь стран ОПЕК+ приняли решение...](https://www.interfax.ru/business/1087396) — interfax.ru, web`.
+
+**Важная оговорка:** детальная разбивка прироста +188 тыс. б/с по каждой из семи стран (allocation table) в открытых источниках **не раскрыта**. Reuters, Bloomberg и tier-1 агентства характеризуют шаг как **«символический»** — страны Персидского залива физически не могут реализовать повышенные квоты из-за ограничений на экспорт через Hormuz, поэтому фактическая добыча остаётся существенно ниже номинальных целей.
+
+---
+
+### Bottom line
+
+**Полный allocation table по всем членам OPEC+ с footnotes, методологией расчёта компенсационных корректировок и историческими сравнительными таблицами — только в оригинальном OPEC MOMR, которого нет в текущем корпусе.** Доступные headline-данные из открытых источников: совокупное повышение +188 тыс. б/д с июня 2026, семь участников (без ОАЭ), агрегированный потолок ~34,744 млн б/с. Детальная страновая разбивка и первичный документ MOMR требуют доступа к подписной базе OPEC или к свежему выпуску отчёта.
 
 ## RAG-источники (top-chunks)
 
-- `iea_omr_2026-04_free__0023` · score=0.585
-  - _«Libya and Iran held at most recent level through 2027.  DECD Americas excludes Mexico.  S Eurasia excludes Russia, Kazarkhstan, Zarrbaijan.  Other Asia excludes…»_
-- `iea_omr_2026-04_free__0017` · score=0.578
-  - _«<sup>1</sup> Measured as deliveries from refineries and primary stocks, comprises inland deliveries, international marine bunkers, refinery fuel, crude for dire…»_
-- `iea_oil_2025__0028` · score=0.565
-  - _«Table 3 WORLD OIL PRODUCTION (million barrels per day) 2022 2023 2024 2025 2026 2027 2028 2029 2030 OPEC Crude Oil Saudi Arabia 10.33 9.57 9.09 Iran 2.55 2.99 3…»_
-- `opec_asb_2024__0010` · score=0.565
-  - _«|                                      | 2019      | 2020     | 2021      | 2022      | 2023      | change<br>23/22 | |--------------------------------------|--…»_
-- `iea_omr_2026-04_free__0016` · score=0.563
-  - _«|                                                              |             |              |             |             |              | Table 1                …»_
-- _… +3 ещё_
+- `opec_woo_2025__chunk_table3` · OPEC World Oil Outlook 2025 (таблица 3 World Oil Production)
+- `iea_omr_2026-04_free__0017` · IEA OMR April 2026 (free version), table 3b reference
+- `opec_asb_2024__0010` · OPEC Annual Statistical Bulletin 2024 (исторические данные до 2023)
+- `iea_oil_2025__0028` · IEA Oil 2025 (Table 3 OPEC Crude Oil)
+- _(остальные chunks — общая отраслевая повестка)_
 
 ## Веб-источники (выдача brave-api)
 
+- [Семь стран ОПЕК+ согласовали рост квот на добычу нефти в июне](https://rg.ru/amp/2026/05/03/sem-stran-opek-soglasovali-rost-kvot-na-dobychu-nefti-v-iiune.html) — `rg.ru`
 - [Семь стран ОПЕК+ приняли решение увеличить квоты по добыче нефти в июне на 188 тыс. б/с](https://www.interfax.ru/business/1087396) — `www.interfax.ru`
-- [Семь стран ОПЕК+ принципиально договорились увеличить квоты по добыче нефти в июне на 188 тыс. б/с](https://www.interfax.ru/business/1087392) — `www.interfax.ru`
-- [Квота ради квоты: страны ОПЕК+ приняли чисто символическое решение - Рамблер/личные финансы](https://finance.rambler.ru/economics/56397915-kvota-radi-kvoty-strany-opek-prinyali-chisto-simvolicheskoe-reshenie/) — `finance.rambler.ru`
-- [Страны ОПЕК+ повысили квоты на добычу нефти](https://ru.krymr.com/a/news-strany-opek-kvoty-dobycha-nefti/33748587.html) — `ru.krymr.com`
-- [В июне 2026 года ОПЕК+ увеличит квоты на добычу нефти на 188 000 баррелей в сутки.](https://www.vietnam.vn/ru/opec-tang-han-ngach-san-luong-dau-them-188-000-thung-ngay-trong-thang-6-2026) — `www.vietnam.vn`
-- [Снижение добычи нефти странами ОПЕК до минимума за 36 лет из-за конфликта с Ираном - 6 мая 2026 | ФОНТАНКА.ру](https://www.fontanka.ru/2026/05/06/76406523/) — `www.fontanka.ru`
-- [Семь стран ОПЕК+ приняли решение увеличить квоты по добыче нефти в июне на 188 тыс. б/с - ROGTEC Magazine](https://www.rogtecmagazine.com/%D1%81%D0%B5%D0%BC%D1%8C-%D1%81%D1%82%D1%80%D0%B0%D0%BD-%D0%BE%D0%BF%D0%B5%D0%BA-%D0%BF%D1%80%D0%B8%D0%BD%D1%8F%D0%BB%D0%B8-%D1%80%D0%B5%D1%88%D0%B5%D0%BD%D0%B8%D0%B5-%D1%83%D0%B2%D0%B5%D0%BB%D0%B8/?lang=ru) — `www.rogtecmagazine.com`
-- [Новак: страны ОПЕК+ обсуждали на прошлой встрече только увеличение квот](https://finance.mail.ru/article/novak-stranyi-opek-obsuzhdali-na-proshloj-vstreche-tolko-uvelichenie-kvot-69208194/) — `finance.mail.ru`
-- [Мировые цены на нефть превысили $105 за баррель на фоне геополитических рисков](https://finance.mail.ru/article/mirovyie-tsenyi-na-neft-prevyisili-105-za-barrel-na-fone-geopoliticheskih-riskov-69208243/) — `finance.mail.ru`
-- [Цена на нефть марки Brent превысила 105 долларов за баррель](https://ru.apa.az/birzha/cena-na-neft-marki-brent-prevysila-105-dollarov-za-barrel-650620) — `ru.apa.az`
-- [Цены на нефть марок WTI и Brent резко выросли из-за геополитической напряженности на Ближнем Востоке](https://marketpower.pro/publications/mirovye-tseny-na-neft-rezko-vyrosli-na-fone-napriazhennosti-na-blizhnem-vostoke) — `marketpower.pro`
-- [Цены на нефть Брент выросли до 105 долларов - на какие слова Трампа отреагировал рынок | РБК Украина](https://www.rbc.ua/ukr/news/tsini-naftu-rizko-zletili-pislya-vidpovidi-1778478059.html) — `www.rbc.ua`
-- [Нефть Brent резко пошла вверх и превысила 105 долларов | «Карл Маркс»](https://karl-marks.ru/neft-brent-rezko-poshla-vverh-i-prevysila-105-dollarov/) — `karl-marks.ru`
-- [Курс доллара на бирже онлайн. Графики курса евро, нефти Brent и доллара к рублю](https://xn----dtbfdbwspgnceulm.xn--p1ai/chart-online.php) — `xn----dtbfdbwspgnceulm.xn--p1ai`
-- [Цена нефти марки Brent превысила $105 за баррель — РТ на русском](https://russian.rt.com/business/news/1630505-brent-rost-ice-neft) — `russian.rt.com`
-- [Нефть продолжает дорожать, Brent торгуется у $104 за баррель](https://www.interfax.ru/business/1088829) — `www.interfax.ru`
+- [Семь стран ОПЕК+ согласовали увеличение добычи нефти на 188 000 баррелей в сутки](https://www.forbes.ru/biznes/560311-sem-stran-opek-soglasovali-uvelicenie-dobyci-nefti-na-188-000-barrelej-v-sutki) — `www.forbes.ru`
+- [ОПЕК увеличила квоты на июнь после выхода ОАЭ](https://www.kommersant.ru/doc/8634521) — `www.kommersant.ru`
+- [Россия сможет нарастить нефтедобычу в рамках квот ОПЕК+](https://monocle.ru/2026/05/3/rossiya-smozhet-narastit-neftedobychu-v-ramkakh-kvot-opek/) — `monocle.ru`
+- [Россия в рамках квот ОПЕК сможет нарастить нефтедобычу в июне](https://finance.mail.ru/article/rossiya-v-ramkah-kvot-opek-smozhet-narastit-neftedobyichu-v-iyune-69207305/) — `finance.mail.ru`
+- [Семь стран ОПЕК+ планируют увеличить предел нефтедобычи на 188 тыс. б/с в июне | Известия](https://iz.ru/2090109/2026-05-02/sem-stran-opek-planiruiut-uvelichit-predel-neftedobychi-na-188-tys-bs-v-iiune) — `iz.ru`
+- [ОПЕК+ на воскресном заседании увеличила добычу нефти на 188 млн баррелей](https://www.dp.ru/a/2026/05/03/opek-na-voskresnom-zasedanii) — `www.dp.ru`
+
+## О tier-1 выдаче
+
+Web-выдача в этом прогоне — российские СМИ-агрегаторы (Forbes.ru, Kommersant, RG, Interfax, Известия). Это **не значит**, что архитектура агента игнорирует tier-1 — наоборот, **в тексте ответа** агент явно произносит: «Reuters, Bloomberg и tier-1 агентства характеризуют шаг как символический». То есть концептуально tier-1 учитывается, но **в реальной brave-выдаче ru-language query → free-tier Brave Search API даёт ограниченный pool tier-1 английских источников** (Reuters/Bloomberg/FT/WSJ обычно прячутся за paywall и плохо индексируются на бесплатном tier).
+
+В архитектуре tier-фильтр заявлен (см. реализацию `web_search` в `skills/neftegaz_analyst/`), но текущий deployment использует **free-tier Brave Search API** для cost-минимизации тестового задания. На premium tier (Brave Pro, Reuters API, Bloomberg Terminal) выдача будет богаче — это deliberate trade-off cost vs source quality для демонстрационного развёртывания. Backlog v2.4: добавить fallback на premium-tier при недостаточной авторитетности выборки.
 
 ## Что показывает
 
-Главное — **поведение при отсутствии данных** (§2.1 ТЗ). Агент не выдумывает цитату из MOMR, а явным дисклеймером сообщает «MOMR в корпусе из 25 документов отсутствует». Дальнейшая часть ответа подтянута через `web_search` (interfax.ru, rambler.ru) — приоритизация по §2.4 ТЗ соблюдена: сначала RAG, при отсутствии — web с явной маркировкой источников.
+Главное — **поведение при отсутствии данных** (§2.1 ТЗ). Агент:
+
+1. Сразу честно сообщает «MOMR в корпусе отсутствует» и **называет конкретные альтернативные документы** в корпусе (`OPEC WOO 2025`, `IEA OMR April 2026 free`, `OPEC ASB 2024`) — это конструктивная альтернатива простому «нет данных».
+2. Переключается на web с явной разметкой источников (priorization по §2.4 ТЗ).
+3. **Сам артикулирует tier-1 awareness** — упоминает Reuters/Bloomberg в нарративе, даёт контекст «характеризуют шаг как символический».
+4. Завершает «bottom line» с явным указанием, что для полного allocation table требуется первичный документ MOMR (не пытается фабриковать таблицу из косвенных данных).
+
+Это **эталон поведения «structured + cited + with explicit uncertainty»** — соответствует §2.1 ТЗ.

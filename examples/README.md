@@ -2,7 +2,7 @@
 
 Раздел собирает **реальные** примеры использования агента «Нефтегазовый аналитик» в трёх форматах:
 
-1. **`dialogues/`** — выборка из Langfuse-трэйсов за последние 7 дней (тестовые прогоны через WS на prod). Покрывает 5 категорий §4.6 ТЗ + bonus multi-tool.
+1. **`dialogues/`** — выборка из Langfuse-трэйсов за последние 7 дней (тестовые прогоны через WS на prod). Покрывает 5 категорий §4.6 ТЗ + bonus многоинструментный + multi-turn + conflict-resolution.
 2. **`scenarios/`** — 5 свежих прогонов под каждый подпункт ТЗ §4.6, выполненных 2026-05-11 на prod (commit `c3c22f6`, после v2.3.5).
 3. **`screenshots/`** — WS dump'ы каждого scenario (запрос/ответ/timing). UI-скриншоты в формате `.png` не приложены — см. раздел [«О screenshots»](#о-screenshots) ниже.
 
@@ -20,15 +20,21 @@
 
 | # | Файл | Категория | trace_id | tools |
 |---|---|---|---|---|
-| 1 | [`01-rag-opec-momr.md`](dialogues/01-rag-opec-momr.md) | RAG (§4.6.1) | [`1032afac…`](https://cloud.langfuse.com/trace/1032afac6f1780d8e2b049101c619175) | rag_search + web_search |
+| 1 | [`01-rag-opec-momr.md`](dialogues/01-rag-opec-momr.md) | RAG (§4.6.1) | [`b24a9c15…`](https://cloud.langfuse.com/trace/b24a9c15ddd1c95561bf3df97acdd6d2) | rag_search + web_search |
 | 2 | [`02-combo-rag-web.md`](dialogues/02-combo-rag-web.md) | Combo (§4.6.3) | [`8e38a759…`](https://cloud.langfuse.com/trace/8e38a759ca2352dea5ebd97dbd6f6a4a) | rag_search + web_search |
 | 3 | [`03-forecast-brent-6m-auto-web.md`](dialogues/03-forecast-brent-6m-auto-web.md) | Forecast (§4.6.4) | [`24d4dfe6…`](https://cloud.langfuse.com/trace/24d4dfe6124e9343e9eada8bb5bed47e) | analyst_query + classify_intent + forecast_call + web_search + validate_citations |
 | 4 | [`04-forecast-sarimax-honest-limitation.md`](dialogues/04-forecast-sarimax-honest-limitation.md) | Forecast (§4.6.4) с явным declaration ограничения | [`07392f8e…`](https://cloud.langfuse.com/trace/07392f8ecdd92dbe3ea10965a5d5c7fb) | analyst_query + classify_intent + forecast_call + validate_citations |
-| 5 | [`05-multi-tool-sanctions-forecast.md`](dialogues/05-multi-tool-sanctions-forecast.md) | **Bonus** — multi-tool (RAG + Web + Forecast) | [`ba81edd9…`](https://cloud.langfuse.com/trace/ba81edd9587ef3446f3f920c98b8e4cc) | analyst_query + classify_intent + forecast_call + web_search + validate_citations |
+| 5 | [`05-multi-tool-sanctions-forecast.md`](dialogues/05-multi-tool-sanctions-forecast.md) | **Bonus** — многоинструментный (RAG + Web + Forecast) | [`ba81edd9…`](https://cloud.langfuse.com/trace/ba81edd9587ef3446f3f920c98b8e4cc) | analyst_query + classify_intent + forecast_call + web_search + validate_citations |
 | 6 | [`06-web-only-current-brent.md`](dialogues/06-web-only-current-brent.md) | Web (§4.6.2) | [`9263be9d…`](https://cloud.langfuse.com/trace/9263be9dbd02716e8b11bb0d416e00a3) | web_search |
 | 7 | [`07-refusal-known-observability-gap.md`](dialogues/07-refusal-known-observability-gap.md) | Refusal (§4.6.5) **с гэпом в Langfuse** | _(no trace)_ | _(none)_ |
+| 8 | [`08-multi-turn-forecast-context.md`](dialogues/08-multi-turn-forecast-context.md) | **Bonus** — multi-turn (3 round, общий sender_session_id) | _см. файл_ | _см. файл_ |
+| 9 | [`09-conflict-rag-vs-web.md`](dialogues/09-conflict-rag-vs-web.md) | **Bonus** — conflict resolution (CREA vs Argus в одном ответе) | [`2e848652…`](https://cloud.langfuse.com/trace/2e8486528a4a8270f0dbd79c2c4a41d1) | rag_search + web_search |
 
 > ⚠ Диалог 7 — это **честная фиксация** известной регрессии: короткие refusal-диалоги (1-2 LLM round, ~10–15s) иногда теряются из-за async batch-flush Langfuse SDK 4.x. Сам ответ агента в WS-сессии корректный (запрос про погоду → отказ), отсутствует только trace, не функциональность. См. [`docs/changelog/2026-05-10-wsrunner-eval-observability.md`](../docs/changelog/2026-05-10-wsrunner-eval-observability.md).
+>
+> ⚠ Диалог 9 использует **тот же trace**, что в диалоге 02 — но с другим фокусом (conflict-handling между CREA и Argus). Координатор PR #61 одобрил такое переиспользование при условии разных фокусов.
+>
+> ⚠ **Известная regression presentation layer (диалоги 03/04/05):** в финальном ответе forecast-запросов присутствует строка про «галлюцинированные цитаты — метаданные pipeline не прошли внешнюю валидацию». Verified **systematic** — в 10/10 forecast traces за 7 дней. Backlog v2.4: фильтр validate_citations warnings перед user-facing answer.
 
 ---
 

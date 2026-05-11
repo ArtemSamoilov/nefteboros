@@ -4,6 +4,8 @@
 
 **Summary:** Запрос объединяет три инструмента: RAG (документы по санкционной повестке), web (свежие новости), forecast (6-12m прогноз Urals). В одном trace — 12 observations с полной иерархией classify_intent → forecast_call → validate_citations.
 
+> ⚠ **Известная регрессия presentation layer (backlog v2.4):** в финальном ответе агента присутствует строка «Системное предупреждение: …метаданные модели (`[ADR-0024]`, `[forecast_model:*]`) помечены как потенциально «галлюцинированные цитаты» — формальная внешняя валидация меток pipeline не подтверждена.». Это **leak internal state валидатора в user-facing message**. Verified **systematic**: фраза «галлюцинированные цитаты — метаданные pipeline не прошли внешнюю валидацию» присутствует в **10 из 10** multi-tool forecast traces за последние 7 дней (см. также диалоги 03 и 04). Issue фиксируется как **известный bug**; правка не входит в scope текущего PR.
+
 ## Метаданные
 
 - **trace_id:** `ba81edd9587ef3446f3f920c98b8e4cc` ([Langfuse](https://cloud.langfuse.com/trace/ba81edd9587ef3446f3f920c98b8e4cc))
@@ -72,6 +74,14 @@
 - [ЕС меняет стратегию санкций против РФ: что в 20-м пакете](https://www.dw.com/ru/evrosouz-menaet-strategiu-sankcij-protiv-rossii-cto-v-20m-pakete/a-76918423) — `www.dw.com`
 - [ЕС согласовал новые санкции против России, но введение запрета на морские перевозки отложено | Евронью́с](https://ru.euronews.com/my-europe/2026/04/23/es-soglasoval-novye-sankcii-protiv-rossii) — `ru.euronews.com`
 - [ЕС отказался от запрета на перевозку российской нефти](https://nsn.fm/policy/ekspert-obyasnil-pochemu-es-otkazalsya-ot-sanktsii-protiv-rossii) — `nsn.fm`
+
+## Регрессия presentation layer (см. выше Summary)
+
+В пункте 2 раздела «Ключевые ограничения и оговорки» (выше в ответе) видно текст, который должен был остаться **внутри** validate_citations и не дойти до пользователя:
+
+> «**Системное предупреждение:** внутренние метаданные модели (`[ADR-0024]`, `[forecast_model:*]`) помечены как потенциально «галлюцинированные цитаты» — формальная внешняя валидация меток pipeline не подтверждена.»
+
+Корень — в synthesize-узле analyst_query: warnings из `validate_citations.validation_warnings` встраиваются в финальный markdown вместо того чтобы оставаться в trace metadata. Backlog v2.4 — отдельная задача presentation-layer фильтра перед отправкой user-facing answer.
 
 ## Что показывает
 

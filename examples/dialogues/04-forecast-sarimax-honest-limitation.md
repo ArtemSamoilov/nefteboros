@@ -4,6 +4,8 @@
 
 **Summary:** Пользователь явно просит SARIMAX. Агент возвращает прогноз через `ou_regime` (доступный метод) и **в первом блоке ответа** явно отмечает: «SARIMAX недоступен; использован ou_regime». Без скрытых подмен.
 
+> ⚠ В разделе «Ключевые ограничения» ответа присутствует тот же presentation-layer leak validate_citations, что описан в диалоге 05 — systematic regression (10/10 forecast traces) → backlog v2.4.
+
 ## Метаданные
 
 - **trace_id:** `07392f8ecdd92dbe3ea10965a5d5c7fb` ([Langfuse](https://cloud.langfuse.com/trace/07392f8ecdd92dbe3ea10965a5d5c7fb))

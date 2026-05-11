@@ -4,6 +4,8 @@
 
 **Summary:** Запрос на прогноз 6m. Агент: classify_intent → forecast_call (модель `ou_regime`) → validate_citations → synthesize. После PR #48 web_search автоматически подключается рядом с forecast для актуализации текущего спота.
 
+> ⚠ В ответе присутствует тот же presentation-layer leak validate_citations, что описан в диалоге 05 («…помечены как потенциально «галлюцинированные цитаты» — метаданные pipeline не прошли внешнюю валидацию»). Systematic regression (10/10 forecast traces за 7 дней) — backlog v2.4.
+
 ## Метаданные
 
 - **trace_id:** `24d4dfe6124e9343e9eada8bb5bed47e` ([Langfuse](https://cloud.langfuse.com/trace/24d4dfe6124e9343e9eada8bb5bed47e))
