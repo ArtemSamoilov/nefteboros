@@ -159,7 +159,7 @@ async def llm_disambiguate(state: GraphState) -> dict[str, Any]:
             result = await structured.ainvoke(messages)
             # `with_structured_output` обычно возвращает уже распарсенный
             # объект и теряет usage_metadata. Это known limitation — для
-            # этого узла cost будет null, см. ADR-0025 §«Known limitations».
+            # этого узла cost будет null, см. ADR-0024-observability-langfuse §«Known limitations».
         except (NotImplementedError, AttributeError):
             response = await chat.ainvoke(messages)
             raw_response = response  # содержит usage_metadata
@@ -175,7 +175,7 @@ async def llm_disambiguate(state: GraphState) -> dict[str, Any]:
 
     # Observability: если LangChain сохранил usage_metadata в ответе (fallback
     # путь), прикрепляем к span'у. На fast-path (with_structured_output)
-    # usage_metadata теряется — span получит cost_usd=null. См. ADR-0025.
+    # usage_metadata теряется — span получит cost_usd=null. См. ADR-0024-observability-langfuse.
     try:
         from nefteboros.observability import log_llm_usage
 

@@ -10,15 +10,13 @@
 flowchart TB
     User([Пользователь])
     User -->|Web UI| Web[Streamlit / Ouroboros web]
-    User -->|Telegram| Bot[Telegram bot<br/>aiogram]
 
     Web --> Core
-    Bot --> Core
 
     subgraph Core["nefteboros core (форк Ouroboros)"]
-        OurLoop[Ouroboros loop<br/>tool dispatcher]
-        AnalystTool[Tool: analyst_query]
-        ForecastTool[Tool: brent_forecast]
+        OurLoop["Ouroboros loop — диспетчер инструментов"]
+        AnalystTool["Tool: analyst_query"]
+        ForecastTool["Tool: brent_forecast"]
         OurLoop --> AnalystTool
         OurLoop --> ForecastTool
     end
@@ -45,16 +43,17 @@ flowchart TB
     AnalystTool --> Classify
     ForecastTool --> Forecast
 
-    RAG -->|hit@k=5| ChromaDB[(ChromaDB<br/>BGE-M3 embeddings)]
-    Web2 --> Brave[Brave Search API<br/>+ tier-1/tier-2 filter]
-    Forecast --> ARIMA[ARIMA / Prophet<br/>+ CI 80/95%]
+    RAG -->|hit@k=5| ChromaDB[("ChromaDB — BGE-M3 embeddings")]
+    Web2 --> Brave["Brave Search API + tier-1/2 фильтр"]
+    Forecast --> OU["OU regime — ограниченный CI 80/95%"]
 
     Synth -.->|LLM call| LLMRouter
     Classify -.->|LLM call| LLMRouter
 
     subgraph LLMRouter["LLM router"]
-        GigaChat[GigaChat Max/Ultra]
-        CloudRu[Cloud.ru<br/>kimi/glm/deepseek]
+        GigaChat["GigaChat-2-Max — llm_disambiguate"]
+        Hydra["Hydra — kimi-k2p6 (primary), glm/deepseek (опционально)"]
+        AItunnel["AItunnel — резервный провайдер (OpenAI-compatible)"]
     end
 ```
 
@@ -63,7 +62,7 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     actor U as Пользователь
-    participant UI as Web/Telegram UI
+    participant UI as Web UI
     participant L as Ouroboros loop
     participant T as analyst_query tool
     participant G as LangGraph subgraph
@@ -97,32 +96,30 @@ sequenceDiagram
 | Слой | Компонент | Файл / директория | Статус |
 |---|---|---|---|
 | **Ядро (форк)** | tool loop + agent | `ouroboros/loop.py`, `ouroboros/agent.py` | Оставляем |
-| | LLM роутер | `ouroboros/llm.py` | Расширим под GigaChat |
+| | LLM роутер | `ouroboros/llm.py` | Реализован (ADR-0007) |
 | | Tools registry | `ouroboros/tools/` | Расширим |
 | | Skill loader | `ouroboros/skill_loader.py` | Используем |
 | | Safety / sandbox | `ouroboros/safety.py` | Не трогаем |
 | | Web UI | `web/` | Косметический ребрендинг |
-| | Telegram bridge | `ouroboros/gateways/` | Оставляем как опцию |
-| **Выпиливаем** | Self-modify | `consciousness.py`, `reflection.py`, `deep_self_review.py`, `improvement_backlog.py`, `consolidator.py` | Удалить |
+| **Выпиливаем** | Self-modify | `consciousness.py`, `reflection.py`, `deep_self_review.py`, `improvement_backlog.py` | Удалить |
 | | Marketplace | `marketplace*.py` | Удалить |
 | | A2A protocol | `a2a_*.py` | Удалить |
-| **Доменное (новое)** | RAG | `nefteboros/rag/` | реализован (ADR-0011/0016) |
-| | Forecast | `nefteboros/forecast/` | реализован (ADR-0012/0013) |
-| | Web search | `nefteboros/search/` | реализован (ADR-0022) — Brave + tier-фильтр + lang detection |
-| | LLM-адаптеры | `nefteboros/llm/` | реализован (ADR-0007/0008) |
-| | LangGraph | `nefteboros/graphs/` | реализован (ADR-0014/0015) |
-| | Citations validator | `nefteboros/citations/` | RAG — реализован, web — отдельный PR |
-| | TG bot (свой) | `nefteboros/bot/` | TBD |
-| | Промпты | `nefteboros/prompts/` | реализован (ADR-0019) |
-| **Skill** | neftegaz_analyst | `skills/neftegaz_analyst/` | TBD |
-| **Eval** | Скрипты | `scripts/eval/` | TBD |
-| | Датасеты | `datasets/` | TBD |
-| | Метрики | `metrics/runs/` | TBD |
-| **Деплой** | Docker | `deploy/` | TBD |
+| **Доменное (новое)** | RAG | `nefteboros/rag/` | Реализован (ADR-0011/0016) |
+| | Forecast | `nefteboros/forecast/` | Реализован (ADR-0012/0013/0024-ou-regime) |
+| | Web search | `nefteboros/search/` | Реализован (ADR-0022) — Brave + tier-фильтр + определение языка |
+| | LLM-адаптеры | `nefteboros/llm/` | Реализован (ADR-0007/0008) |
+| | LangGraph | `nefteboros/graphs/` | Реализован (ADR-0014/0015) |
+| | Валидатор цитат | `nefteboros/citations/` | RAG — реализован, web — отдельный PR |
+| | Промпты | `nefteboros/prompts/` | Реализован (ADR-0019) |
+| **Skill** | neftegaz_analyst | `skills/neftegaz_analyst/` | Реализован |
+| **Eval** | Скрипты | `scripts/eval/` | Реализован (e2e, rag, forecast, routing); citations — заглушка (план v2.4) |
+| | Датасеты | `datasets/` | Реализован |
+| | Метрики | `metrics/runs/` | Реализован |
+| **Деплой** | Docker | `deploy/` | Реализован (multi-arch GHCR) |
 
 ## Принципы
 
-1. **Каждый подграф измеряем.** RAG — hit@k/MRR; routing — accuracy/F1; citations — precision/recall; forecast — MAPE/RMSE/coverage; e2e — golden dialogues.
+1. **Каждый подграф измеряем.** RAG — hit@k/MRR; routing — accuracy/F1; citations — precision/recall (план v2.4); forecast — MAPE/RMSE/coverage; e2e — golden dialogues.
 2. **Цитирование — критичное место.** Ответ агента не должен содержать «источников» без подтверждения. Пост-валидатор `nefteboros/citations/` проверяет, что каждая ссылка вида `[Отчёт OPEC MOMR, март 2025]` соответствует чанку, реально извлечённому RAG'ом.
 3. **Кросс-язычность.** Эмбеддинги мультиязычные (BGE-M3) — отчёты OPEC/IEA/EIA на английском, пользователь спрашивает по-русски.
 4. **Маршрутизация — явная.** Не «пусть LLM решит», а классификатор намерения с явным набором веток. Это даёт измеримость.
@@ -151,9 +148,9 @@ classify_intent →
 
 Реализация: post-filter по hostname после Brave API. Полная замена через ENV — `NEFTEBOROS_WEB_TIER1_HOSTS=...`, `NEFTEBOROS_WEB_TIER2_HOSTS=...`, `NEFTEBOROS_WEB_BLACKLIST_HOSTS=...`.
 
-Lang detection (`nefteboros/search/lang.py`): доля кириллицы ≥ 30% → RU (Brave `search_lang=ru, country=RU`); иначе EN. RU-запрос ловит RU-tier1, EN — EN-tier1.
+Определение языка (`nefteboros/search/lang.py`): доля кириллицы ≥ 30% → RU (Brave `search_lang=ru, country=RU`); иначе EN. RU-запрос ловит RU-tier1, EN — EN-tier1.
 
-## Observability (ADR-0024)
+## Observability (ADR-0024-observability-langfuse)
 
 Серверные трейсы всех узлов LangGraph + cost/latency идут в **Langfuse Cloud**. Декораторы `observe(name=...)` навешиваются на узлы в `nefteboros/graphs/analyst_graph.py:build_analyst_graph` через wrap при `add_node` — файлы `nodes/*.py` остаются без декораторов. Entry-points (CLI, ouroboros tool, eval скрипты) используют `invoke_with_trace(graph, state)` для открытия top-level trace на запрос. LLM-вызовы внутри узлов прикрепляют tokens/cost к текущему span'у через `log_llm_usage(usage)` (модуль `nefteboros/observability/`). Параллельно с Langfuse пишется JSON-trace в `metrics/runs/<ts>/trace.jsonl` — backup для demo-режима без Langfuse-аккаунта (`LANGFUSE_ENABLED=false`). Cost считается через иерархию: наши `COST_RATES` (kimi-k2p6, GigaChat-2-Max) → fallback `ouroboros.pricing.estimate_cost` → null.
 

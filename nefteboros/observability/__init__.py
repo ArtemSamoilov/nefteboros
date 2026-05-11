@@ -1,6 +1,6 @@
 """Observability — Langfuse трейсинг для агента.
 
-См. ADR-0025 (`docs/adr/0025-observability-langfuse.md`).
+См. ADR-0024-observability-langfuse (`docs/adr/0024-observability-langfuse.md`).
 
 **Архитектура:**
 
@@ -132,8 +132,8 @@ def observe(
     """Декоратор для async-узлов LangGraph — обёртка над `langfuse.observe`.
 
     Применяется через wrap при `add_node` в `analyst_graph.py`, чтобы файлы
-    `nefteboros/graphs/nodes/*.py` оставались доменными (см. ADR-0025 §«Где
-    лежат декораторы»).
+    `nefteboros/graphs/nodes/*.py` оставались доменными (см.
+    ADR-0024-observability-langfuse §«Где лежат декораторы»).
 
     Поведение:
     - Langfuse SDK сам управляет OTel context'ом: вложенные @observe
