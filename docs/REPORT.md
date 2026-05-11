@@ -22,7 +22,12 @@
 
 ## 3. Технологии и обоснование
 
-**LLM — GigaChat + Hydra/kimi-k2p6 + AItunnel** ([ADR-0007](adr/0007-llm-providers.md)). GigaChat обязателен по контексту (Сбер). Hydra/kimi-k2p6 — primary worker для синтеза (256k context, доступен из РФ, tool-calling). AItunnel — secondary fallback после prod-инцидента 2026-05-11 (Hydra suspended billing): автоматическая failover-цепочка через `OUROBOROS_MODEL_FALLBACK`. OpenAI/Anthropic отвергнуты — недоступны из РФ без VPN, неприменимо для prod-агента под Сбер.
+**LLM stack — GigaChat + Kimi K2 (через Hydra) + AItunnel backup** ([ADR-0007](adr/0007-llm-providers.md)). Разные модели на разные роли, vendor-agnostic OpenAI-compatible транспорт.
+
+- **GigaChat-2-Max** — узел `llm_disambiguate` в `analyst_graph` ([ADR-0015](adr/0015-llm-disambiguate.md), `nefteboros/graphs/nodes/llm_disambiguate.py`): вызывается conditional-edge'ом когда rule-based `classify_intent` возвращает `matched_rule == "no_keyword_match"`. Structured-JSON output, перезаписывает `state.intent`. Модель Sber применена там, где её сильные стороны в русскоязычной семантике дают наибольший выигрыш — на disambiguation неоднозначных пользовательских запросов.
+- **Kimi K2 (kimi-k2p6)** — primary worker для синтеза ответа и chunk-tagging. **Open-weights модель Moonshot AI** — при необходимости разворачивается в защищённом контуре Сбера (vLLM / sglang / llama.cpp), без зависимости от внешнего провайдера. В нашем deploy подключается через российский OpenAI-compatible шлюз Hydra; смена на on-prem inference endpoint — это правка `base_url` в env, без изменения кода. 256k context и нативный tool-calling — вторичные плюсы.
+- **AItunnel** — backup провайдер (тот же OpenAI-compatible протокол, те же open-weights модели). Подключается автоматически через `OUROBOROS_MODEL_FALLBACK` при empty response от primary.
+- **OpenAI / Anthropic** отвергнуты — недоступны из РФ без VPN, неприменимо для prod-агента под Сбер.
 
 **Forecast — Ornstein-Uhlenbeck mean-reverting, не SARIMAX/ARIMA** ([ADR-0024-ou-regime-forecast](adr/0024-ou-regime-forecast.md)). Стат-модели (SARIMAX + GBR ensemble, изначально [ADR-0012](adr/0012-price-tools.md)/[ADR-0013](adr/0013-hybrid-forecasting.md)) дают расходящуюся CI (Var ∝ t): ширина ±30-40% на 12m — неактионабельно. Заменены на OU per scenario: `dS = θ(μ(t) - S)dt + σ dW`, Var → `σ²/(2θ)` bounded. Параметры μ/θ/σ откалиброваны через Kilian elasticity ($12/bbl на 1 mbpd) + bank consensus + regime-specific historical vol. Это даёт структурно-актионабельный CI «при сценарии X target $Y, скорость reversion Z, vol W» — как мыслит senior-аналитик.
 
