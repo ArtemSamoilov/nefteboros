@@ -2,7 +2,7 @@
 
 Раздел собирает **реальные** примеры использования агента «Нефтегазовый аналитик» в трёх форматах:
 
-1. **`dialogues/`** — выборка из Langfuse-трэйсов за последние 7 дней (тестовые прогоны через WS на prod). Покрывает 5 категорий §4.6 ТЗ + bonus многоинструментный + multi-turn + conflict-resolution.
+1. **`dialogues/`** — выборка из Langfuse-трэйсов за последние 7 дней (тестовые прогоны через WS на prod). Покрывает 5 категорий §4.6 ТЗ + bonus многоинструментный.
 2. **`scenarios/`** — 5 свежих прогонов под каждый подпункт ТЗ §4.6, выполненных 2026-05-11 на prod (commit `c3c22f6`, после v2.3.5).
 3. **`screenshots/`** — WS dump'ы каждого scenario (запрос/ответ/timing). UI-скриншоты в формате `.png` не приложены — см. раздел [«О screenshots»](#о-screenshots) ниже.
 
@@ -27,12 +27,8 @@
 | 5 | [`05-multi-tool-sanctions-forecast.md`](dialogues/05-multi-tool-sanctions-forecast.md) | **Bonus** — многоинструментный (RAG + Web + Forecast) | [`ba81edd9…`](https://cloud.langfuse.com/trace/ba81edd9587ef3446f3f920c98b8e4cc) | analyst_query + classify_intent + forecast_call + web_search + validate_citations |
 | 6 | [`06-web-only-current-brent.md`](dialogues/06-web-only-current-brent.md) | Web (§4.6.2) | [`9263be9d…`](https://cloud.langfuse.com/trace/9263be9dbd02716e8b11bb0d416e00a3) | web_search |
 | 7 | [`07-refusal-correct-handling.md`](dialogues/07-refusal-correct-handling.md) | Refusal (§4.6.5) (автоматический прогон, trace artifact) | _(no trace в этом прогоне)_ | _(none)_ |
-| 8 | [`08-multi-turn-forecast-context.md`](dialogues/08-multi-turn-forecast-context.md) | **Bonus** — multi-turn (3 round, общий sender_session_id) | _см. файл_ | _см. файл_ |
-| 9 | [`09-conflict-rag-vs-web.md`](dialogues/09-conflict-rag-vs-web.md) | **Bonus** — conflict resolution (CREA vs Argus в одном ответе) | [`2e848652…`](https://cloud.langfuse.com/trace/2e8486528a4a8270f0dbd79c2c4a41d1) | rag_search + web_search |
 
 > ℹ Диалог 7 — корректный отказ на короткий out-of-domain запрос; в данном WS-прогоне trace в Langfuse не подтянулся — артефакт автоматического теста (short refusal + WS close раньше async flush). В реальных пользовательских сессиях через web UI trace ловится. Архитектурный контекст: [`docs/changelog/2026-05-10-wsrunner-eval-observability.md`](../docs/changelog/2026-05-10-wsrunner-eval-observability.md).
->
-> ⚠ Диалог 9 использует **тот же trace**, что в диалоге 02 — но с другим фокусом (conflict-handling между CREA и Argus). Координатор PR #61 одобрил такое переиспользование при условии разных фокусов.
 >
 > ⚠ **Известная regression presentation layer (диалоги 03/04/05):** в финальном ответе forecast-запросов присутствует строка про «галлюцинированные цитаты — метаданные pipeline не прошли внешнюю валидацию». Verified **systematic** — в 10/10 forecast traces за 7 дней. Backlog v2.4: фильтр validate_citations warnings перед user-facing answer.
 
