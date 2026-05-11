@@ -107,6 +107,15 @@ def remote_parent_cm(tc: Optional[dict[str, str]]) -> Iterator[None]:
     if not tc or "trace_id" not in tc or "parent_span_id" not in tc:
         yield
         return
+
+    # Build parent OTel context. Если setup fails — yield без него (graceful
+    # degrade). КРИТИЧНО: только ОДИН yield в generator-CM. Старая версия
+    # имела два yield (в try и в except) → если downstream throws exception
+    # после первого yield, generator при `__exit__` пытался re-yield во
+    # втором — `RuntimeError: generator didn't stop after throw()`. Эта
+    # ошибка ломала observability state на всех последующих request'ах в
+    # процессе. См. fix observability fragility.
+    non_rec = None
     try:
         from opentelemetry import trace as _otel_trace_api
         from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
@@ -118,10 +127,16 @@ def remote_parent_cm(tc: Optional[dict[str, str]]) -> Iterator[None]:
             trace_flags=TraceFlags(0x01),
         )
         non_rec = NonRecordingSpan(parent_ctx)
-        with _otel_trace_api.use_span(non_rec, end_on_exit=False):
-            yield
     except Exception:
-        logger.debug("remote_parent_cm failed; span будет создан без parent context")
+        logger.debug(
+            "remote_parent_cm: failed to build parent context, span будет создан без parent"
+        )
+
+    if non_rec is None:
+        yield
+        return
+
+    with _otel_trace_api.use_span(non_rec, end_on_exit=False):
         yield
 
 
@@ -323,24 +338,34 @@ def _patch_handle_task() -> None:
                     root_span.update(output=output_payload)
                 except Exception:  # noqa: BLE001
                     pass
-                # Explicit flush: Langfuse 4.x SDK батчит spans асинхронно
-                # (по time/size triggers). Короткие диалоги (refusal без
-                # tools, ~1-7s) закрывают WS connection раньше, чем batch
-                # отправляется → trace теряется в Langfuse. Длинные
-                # multi-tool диалоги работают за счёт периодического
-                # flush'а внутри batch window. Явный flush здесь
-                # гарантирует доставку для **всех** диалогов независимо
-                # от длительности. Cost: ~100-300ms к latency per request.
-                try:
-                    client.flush()
-                except Exception:  # noqa: BLE001 — flush никогда не ломает request
-                    pass
-                return result
+                # NB: flush НЕ внутри `with start_as_current_observation`
+                # block — span ещё open и trace **incomplete**. Перенесли
+                # flush ниже, ПОСЛЕ exit context manager.
         except Exception:
             logger.exception(
                 "handle_task observability wrapper failed; running without obs"
             )
             return original(self, task)
+        else:
+            # `with start_as_current_observation` закрылся → root span
+            # finalized → trace полный → flush'аем для гарантии delivery
+            # на коротких диалогах.
+            #
+            # NB: OTel `tracer_provider.force_flush()` ломал child trace
+            # propagation для tool_dispatch worker threads (ThreadPoolExecutor)
+            # — sync close pipeline на уровне provider'а обрывал OTel context
+            # inheritance, и tool span'ы (rag_search, web_search, analyst_query)
+            # становились orphan root traces вместо child user_request.
+            # Trade-off: с force_flush refusal-path стабильно, но child
+            # tools теряются → user_request пустой по содержанию. Без
+            # force_flush — иерархия восстанавливается, цена: refusal-path
+            # иногда теряется. Качественная иерархия > 100% refusal coverage,
+            # см. changelog 2026-05-11-observability-post-span-flush.md.
+            try:
+                client.flush()
+            except Exception:  # noqa: BLE001 — flush никогда не ломает request
+                pass
+            return result
         finally:
             try:
                 _current_session_id.reset(sess_token)

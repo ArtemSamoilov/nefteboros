@@ -365,46 +365,62 @@ class WSRunner:
                         }
                     )
                 )
-                # Break logic (по образцу scripts/verify_track_f_ws.py):
-                # server.py не всегда выставляет `done=True` явно. Поэтому
-                # выходим при substantial assistant message (chars > 50)
-                # после короткого grace на финальные chunks. Так же
-                # honour'им явный done если приходит.
+                # Break logic. Не доверяем "первому substantial chunk":
+                # для tool-call paths agent loop сначала шлёт notification
+                # chunk (~85 chars, "⚡ Fallback ..."), затем долго работает
+                # (rag/web/forecast tools, ~20-60s), и только потом — финальный
+                # ответ. Раннее break теряет реальный ответ.
+                #
+                # Стратегия: ждать любого из 3 сигналов:
+                # 1. `done=True` flag на assistant chunk (явный finish).
+                # 2. Log event `task_metrics_event` для нашего task — это
+                #    server-side сигнал, что agent loop завершён.
+                # 3. Idle timeout: ``IDLE_TIMEOUT`` секунд без новых assistant
+                #    chunks ПОСЛЕ того как хотя бы один chunk был получен.
+                IDLE_TIMEOUT_S = 45.0
                 t0 = _time.time()
+                last_chunk_ts: Optional[float] = None
                 last_chars = 0
-                got_substantial = False
+                task_finished = False
                 while _time.time() - t0 < self._timeout:
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                        raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
                     except asyncio.TimeoutError:
-                        # Если уже получили substantial — это сигнал что
-                        # сервер замолчал, выходим.
-                        if got_substantial:
+                        # Idle check: если уже был chunk и тишина > IDLE.
+                        if (
+                            last_chunk_ts is not None
+                            and _time.time() - last_chunk_ts > IDLE_TIMEOUT_S
+                        ):
                             break
                         continue
                     try:
                         msg = json.loads(raw)
                     except (json.JSONDecodeError, TypeError):
                         continue
-                    if (
-                        msg.get("type") == "chat"
-                        and msg.get("role") == "assistant"
-                    ):
+                    mtype = msg.get("type")
+                    if mtype == "chat" and msg.get("role") == "assistant":
                         content = msg.get("content", "") or ""
                         if content and len(content) != last_chars:
                             last_content = content
                             last_chars = len(content)
+                            last_chunk_ts = _time.time()
                         if msg.get("done") and content:
+                            # Грейс на хвост log-events.
                             await asyncio.sleep(1.0)
                             break
-                        if last_chars > 50 and not got_substantial:
-                            got_substantial = True
-                            # Grace на финальные events (последний расширенный
-                            # chunk + потенциальный done).
+                    elif mtype == "log":
+                        # Server emits `task_metrics_event` когда agent loop
+                        # завершён (см. ouroboros agent_task_pipeline).
+                        data = msg.get("data") or {}
+                        if isinstance(data, dict) and data.get("type") == (
+                            "task_metrics_event"
+                        ):
+                            task_finished = True
+                            # Грейс 2с — финальный assistant chunk обычно
+                            # приходит до task_metrics_event, но иногда
+                            # сразу после.
                             await asyncio.sleep(2.0)
-                            # Оставляем ещё один проход цикла на recv с
-                            # коротким timeout — если ничего нет, выйдем
-                            # через 15s recv-таймаут (см. except выше).
+                            break
                 else:
                     return RunResult(
                         answer=last_content,
@@ -842,10 +858,23 @@ def _print_summary(metrics: dict) -> None:
 async def _run_all(
     runner: AgentRunner, dialogues: list[dict]
 ) -> list[DialogueScore]:
+    """Sequential runner с inter-dialogue паузой.
+
+    Inter-dialogue sleep (3s) — workaround для async Langfuse SDK flush.
+    Короткие диалоги (refusal ~20s, web_only ~60s) возвращают handle_task
+    раньше, чем background batch успевает отправить trace. Без паузы
+    следующий dialogue стартует <1s после → next root span overlap →
+    batch drops старый trace. С паузой 3s — flush успевает (interval
+    Langfuse SDK ~1s + network).
+    """
+    INTER_DIALOGUE_SLEEP_S = 3.0
     scores = []
-    for d in dialogues:
+    for i, d in enumerate(dialogues):
         result = await runner.run(d)
         scores.append(score_dialogue(d, result))
+        # Не sleep после последнего.
+        if i < len(dialogues) - 1:
+            await asyncio.sleep(INTER_DIALOGUE_SLEEP_S)
     return scores
 
 
