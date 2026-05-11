@@ -40,15 +40,17 @@ synthesize → validate_citations → END
 
 **Инструментация есть.** Каждый узел оборачивается `observe(name=...)` при `add_node` (`analyst_graph.py:119-132`):
 
-| Узел | Имя span'а | as_type | Где cost / tokens |
+| Узел | Имя span'а | as_type | Что зафиксировано в Langfuse |
 |---|---|---|---|
-| `_classify_node` | `classify_intent` | span | — (по правилам, без LLM) |
-| `llm_disambiguate` | `llm_disambiguate` | generation | `log_llm_usage` в `nodes/llm_disambiguate.py:184` |
-| `forecast_call` | `forecast_call` | span | — (OU детерминирован) |
-| `synthesize` | `synthesize` | generation | `log_llm_usage` в `nodes/synthesize.py:188` |
-| `validate_citations` | `validate_citations` | span | — (regex + lookup) |
+| `_classify_node` | `classify_intent` | span | latency, status (без LLM) |
+| `llm_disambiguate` | `llm_disambiguate` | generation | latency, status; `log_llm_usage` вызывается, но cost/tokens/model — `null` (backlog v2.4) |
+| `forecast_call` | `forecast_call` | span | latency, status (OU детерминирован) |
+| `synthesize` | `synthesize` | generation | latency, status; `log_llm_usage` вызывается, но cost/tokens/model — `null` (backlog v2.4) |
+| `validate_citations` | `validate_citations` | span | latency, status |
 
 Корневой span `user_request` открывается в `nefteboros/observability/_ouroboros_patches.py:299`, дочерние span'ы (`ouroboros_chat`, `analyst_query`, узлы) пристёгиваются через OTel-контекст.
+
+> ℹ **Enrichment'а cost / tokens / model name в generation-spans Langfuse сейчас нет** (verified дампом 10 generations за окно 15 мин). `log_llm_usage` вызывается в `synthesize._call_llm` и `llm_disambiguate._call_llm`, но финальные spans приходят с `provided_model_name=null`, `usage_details=null`, `total_cost=null`. Полная реализация — backlog v2.4.
 
 JSON-трейс параллельно в `metrics/runs/<ts>/trace.jsonl` (см. [ADR-0024 observability](../adr/0024-observability-langfuse.md)).
 
