@@ -84,12 +84,30 @@ uv venv -p 3.12
 source .venv/bin/activate
 uv pip install -e . -r requirements-domain.txt
 
-# Индексация PDF-корпуса (после загрузки в data/corpus/):
-python -m scripts.build_index
-
-# Запуск веб-интерфейса:
+# Запуск веб-интерфейса (нужен подготовленный vectorstore — см. ниже):
 python launcher.py
 ```
+
+### Корпус и vectorstore
+
+PDF (~135MB, 25 документов) и Chroma vectorstore (~65MB) в репозиторий не залиты из-за размера. Все источники — в открытом доступе, manifest (URLs / hashes / даты публикации) — в [`data/metadata/manifest.yml`](data/metadata/manifest.yml).
+
+**Быстрый старт — pre-built vectorstore из GitHub Releases (~24MB, 30 сек):**
+```bash
+curl -L https://github.com/ArtemSamoilov/nefteboros/releases/download/v2.3.6/vectorstore-v2.3.6.tar.gz \
+  | tar -xz -C data/
+python launcher.py   # RAG работает сразу
+```
+
+**Полный pipeline воспроизводства (~60-90 мин, если нужен глубокий ревью):**
+```bash
+python -m scripts.fetch_corpus      # download 25 PDF по manifest
+python -m scripts.convert_corpus    # PDF → Markdown (Marker)
+python -m scripts.chunk_corpus      # chunking с метаданными (название отчёта, дата, страница)
+python -m scripts.build_index       # построение Chroma vectorstore
+```
+
+**Альтернатива — тестовая работа без локальной установки:** открытый prod на `https://nefteboros.ru/` — корпус уже indexed, всё работает из коробки.
 
 ### Docker (prod-like)
 
@@ -97,7 +115,7 @@ python launcher.py
 docker compose -f deploy/docker-compose.yml up
 ```
 
-Поднимет веб-интерфейс и ChromaDB. Готовые multi-arch образы публикуются в GHCR на каждый тег `vX.Y.Z`; pull: `docker pull ghcr.io/artemsamoilov/nefteboros:v2.3.5`.
+Поднимет веб-интерфейс и ChromaDB. Готовые multi-arch образы публикуются в GHCR на каждый тег `vX.Y.Z`; pull: `docker pull ghcr.io/artemsamoilov/nefteboros:v2.3.6`. Для Docker-запуска vectorstore берётся из `$NEFTEBOROS_HOST_DATA` (bind mount) — сначала разверни pre-built tarball или прогон pipeline по шагам выше.
 
 ## Конфигурация
 
@@ -116,7 +134,7 @@ docker compose -f deploy/docker-compose.yml up
 
 1. **GigaChat (Сбер)** — `langchain_gigachat`. Изначально основная модель в ADR ([ADR-0007](docs/adr/0007-llm-providers.md)). Бонус: знакомство с продуктом Сбера для оценщика, RU-данные on-prem, OAuth с CA Минцифры, нативный вызов инструментов в Pro+.
 2. **Hydra (kimi-k2p6, glm-5, deepseek и др.)** — `langchain_openai.ChatOpenAI(base_url=...)` через шлюз, совместимый с API OpenAI. Покрывает 9 моделей через одного провайдера; используется для сравнительной оценки и как основная в текущей prod-конфигурации (`OUROBOROS_MODEL=openai-compatible::kimi-k2p6` — kimi-k2p6 показала лучшее покрытие вызова инструментов).
-3. **AITunnel** — резервный провайдер с теми же моделями (kimi-k2.6) через российский прокси, совместимый с API OpenAI. Добавлен 2026-05-11 после того, как Hydra (под капотом Fireworks.ai) была suspended за биллинг; без рабочего резерва демо невозможно. См. [changelog 2026-05-11-aitunnel-llm-fallback.md](docs/changelog/2026-05-11-aitunnel-llm-fallback.md).
+3. **AItunnel** — резервный провайдер с теми же моделями (kimi-k2.6) через российский прокси, совместимый с API OpenAI. Подключается автоматически через `OUROBOROS_MODEL_FALLBACK` при пустом ответе от основного провайдера — vendor-agnostic failover, без зависимости от конкретного шлюза.
 
 **Текущий prod (Timeweb VDS, 2026-05-11):** `OUROBOROS_MODEL=openai-compatible::kimi-k2p6`, `OUROBOROS_MODEL_FALLBACK=aitunnel::kimi-k2.6`. GigaChat поддерживается архитектурно (переключается одной переменной env), не активен в prod из-за уже отстроенного вызова инструментов на kimi.
 
@@ -130,7 +148,7 @@ docker compose -f deploy/docker-compose.yml up
 |---|---|---|---|
 | RAG retriever | chunk_hit@k, source_hit@k, MRR; срез по lang/block | `scripts/eval/eval_rag.py` | `datasets/rag_qa.jsonl` |
 | Routing / Intent | type_accuracy, assets_jaccard, horizon_match, P/R/F1 | `scripts/eval/eval_intent_classifier.py` | `datasets/intent_classifier.jsonl` |
-| Citations | precision, recall, false_attribution_rate | `scripts/eval/eval_citations.py` ⚠️ заглушка | `datasets/citations_gold.jsonl` |
+| Citations | precision, recall, false_attribution_rate | `scripts/eval/eval_citations.py` ⚠️ заглушка | gold-датасет в плане v2.4 (Track D6) |
 | Forecast (OU production) | MAPE, Bias, Coverage 80%/95%, per-regime | `scripts/eval/eval_ou.py` | walk-forward 5y |
 | Forecast (статистический ансамбль baseline) | MAPE, RMSE, MASE vs RW, directional accuracy | `scripts/eval/eval_forecast.py` | walk-forward |
 | Web search | (нет выделенного скрипта — косвенно через e2e) | — | — |
