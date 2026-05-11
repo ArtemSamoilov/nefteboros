@@ -858,10 +858,23 @@ def _print_summary(metrics: dict) -> None:
 async def _run_all(
     runner: AgentRunner, dialogues: list[dict]
 ) -> list[DialogueScore]:
+    """Sequential runner с inter-dialogue паузой.
+
+    Inter-dialogue sleep (3s) — workaround для async Langfuse SDK flush.
+    Короткие диалоги (refusal ~20s, web_only ~60s) возвращают handle_task
+    раньше, чем background batch успевает отправить trace. Без паузы
+    следующий dialogue стартует <1s после → next root span overlap →
+    batch drops старый trace. С паузой 3s — flush успевает (interval
+    Langfuse SDK ~1s + network).
+    """
+    INTER_DIALOGUE_SLEEP_S = 3.0
     scores = []
-    for d in dialogues:
+    for i, d in enumerate(dialogues):
         result = await runner.run(d)
         scores.append(score_dialogue(d, result))
+        # Не sleep после последнего.
+        if i < len(dialogues) - 1:
+            await asyncio.sleep(INTER_DIALOGUE_SLEEP_S)
     return scores
 
 
