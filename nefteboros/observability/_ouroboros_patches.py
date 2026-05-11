@@ -348,43 +348,22 @@ def _patch_handle_task() -> None:
             return original(self, task)
         else:
             # `with start_as_current_observation` закрылся → root span
-            # finalized → trace полный → теперь flush'аем синхронно.
+            # finalized → trace полный → flush'аем для гарантии delivery
+            # на коротких диалогах.
             #
-            # Explicit flush + grace sleep: Langfuse 4.x SDK батчит spans
-            # асинхронно. `client.flush()` signals background worker, но
-            # сам **не блокирует** до конца отправки. Для очень коротких
-            # диалогов (refusal ~15-20s, web spot ~60s) handle_task
-            # возвращается, server принимает следующий request, тот
-            # стартует НОВЫЙ root span → batch ещё не отправлен → старый
-            # trace дропается. Sleep 500ms даёт worker'у завершить batch
-            # transfer ДО следующего request'a.
-            #
-            # Cost: ~500ms к latency per request — незаметно для WS chat,
-            # критично для eval (5/5 trace coverage vs 2-4/5).
-            # Sync flush: ждём все pending spans, ВКЛЮЧАЯ child spans от
-            # tool_dispatch ThreadPoolExecutor (web_search, rag_search,
-            # forecast_call). Без этого short tool-calling диалоги теряют
-            # trace: main handle_task возвращается → client.flush()
-            # отправляет main span, но child spans от worker threads
-            # ещё open → следующий request пере-использует trace_id →
-            # batch overlap → Langfuse drops старый trace.
-            #
-            # OTel `tracer_provider.force_flush(timeout_millis)` — sync
-            # API, блокирует до завершения всех SpanProcessor pipelines
-            # (включая batch экспортёр Langfuse). 5000ms — щедрый запас,
-            # реально завершается за <100-500ms.
-            try:
-                from opentelemetry import trace as _otel_trace
-                _provider = _otel_trace.get_tracer_provider()
-                if hasattr(_provider, "force_flush"):
-                    _provider.force_flush(timeout_millis=5000)
-            except Exception:  # noqa: BLE001 — flush никогда не ломает request
-                pass
-            # Дополнительный legacy flush — Langfuse client.flush() остаётся
-            # как safety net для версий SDK без OTel-уровня pipeline.
+            # NB: OTel `tracer_provider.force_flush()` ломал child trace
+            # propagation для tool_dispatch worker threads (ThreadPoolExecutor)
+            # — sync close pipeline на уровне provider'а обрывал OTel context
+            # inheritance, и tool span'ы (rag_search, web_search, analyst_query)
+            # становились orphan root traces вместо child user_request.
+            # Trade-off: с force_flush refusal-path стабильно, но child
+            # tools теряются → user_request пустой по содержанию. Без
+            # force_flush — иерархия восстанавливается, цена: refusal-path
+            # иногда теряется. Качественная иерархия > 100% refusal coverage,
+            # см. changelog 2026-05-11-observability-post-span-flush.md.
             try:
                 client.flush()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — flush никогда не ломает request
                 pass
             return result
         finally:

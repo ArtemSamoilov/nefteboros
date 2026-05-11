@@ -24,15 +24,14 @@ try:
 except Exception:
     ...
 else:
-    # span закрыт → trace finalized → теперь flush'аем синхронно
-    _provider.force_flush(timeout_millis=5000)
+    # span закрыт → trace finalized → flush для гарантии delivery
     client.flush()
     return result
 ```
 
-`force_flush(5000ms)` через OTel `tracer_provider` — **синхронный** API, блокирует до завершения всех SpanProcessor pipelines (включая batch экспортёр Langfuse). Реально завершается за <100-500ms.
+`client.flush()` сразу после exit context manager — Langfuse SDK batch получает root span и отправляет на следующем tick'е.
 
-`client.flush()` оставлен как safety net для SDK без OTel-уровня pipeline.
+**Что было отвергнуто и почему.** Пробовали `tracer_provider.force_flush(timeout_millis=5000)` через OTel — синхронный close всех SpanProcessor pipelines. Он давал стабильно 5/5 root traces, **но ломал child propagation для tool_dispatch worker threads**: sync close обрывал OTel context inheritance, и span'ы `rag_search`/`web_search`/`analyst_query` появлялись как orphan root traces вместо child user_request. Trade-off неприемлем — оценщик читает иерархию trace'а, а пустой `user_request` без tool calls + рядом orphan tools = выглядит сломано. Откатили в финальной версии PR, оставили только `client.flush()`.
 
 ### 2. `remote_parent_cm` single-yield
 
@@ -43,38 +42,35 @@ else:
 ### До (v2.3.4, flush внутри span)
 
 5 диалогов в session, repeated runs:
-- Round 1: 3/5 (e2e_0001, _0005 потеряны)
-- Round 2: 3/5 (e2e_0002, _0004 потеряны)
-- Round 3: 3/5 (другая пара)
 - Pattern: 2 терь стабильно, пара меняется.
+- Trace `user_request` создавался, но **input/output не успевали** записаться (span ещё open при flush).
 
-### После (этот PR, flush после span + OTel force_flush + inter-dialogue 3s)
+### После (этот PR, flush после span + client.flush + inter-dialogue 3s)
 
-5 диалогов в session, repeated runs:
-- ✓ **forecast** (forecast tool call) — trace полный
-- ✓ **rag_plus_web** (combo) — trace полный
-- ✓ **out_of_scope** (refusal, ~20s) — trace полный (**это категория, которая в v2.3.4 терялась чаще всего**)
-- ✗ **rag_only** (RAG-only tool path) — иногда теряется
-- ✗ **web_only** (web_search only, ~60s) — иногда теряется
+Smoke 3 диалога на проде после revert force_flush, 2026-05-11:
+- ✓ **rag_plus_web** (12:00:07) — 15 observations, **3 TOOL spans** (rag_search + 2×web_search) **все child user_request**, input/output полные.
+- ⚠ **rag_only** (12:05:30) — 5 observations, 1 TOOL span (rag_search) child, **empty input/output** — handle_task видимо не успел `root_span.update(output=...)` (eval timeout 360s).
+- 2/3 root traces появились в Langfuse. Третий потерян (~33% refusal-rate как было в peaceful-einstein).
 
-Стабильно **3/5**. Refusal-path теперь **никогда не теряется** (vs v2.3.4, где он терялся чаще всего) — это главный прогресс этого PR.
+Главное: **child иерархия восстановлена** — оценщик видит полный flow agent'а (classify_intent → tool calls → synthesize → validate_citations) внутри `user_request`. Это «качественный trace» — критерий приоритета.
 
-## Known limitation (для backlog v2.4)
+## Known limitations (backlog v2.4)
 
-**Tool-calling dialogues (`rag_only`, `web_only`) иногда теряют trace** — async batch flush race с child spans от `ouroboros.tools._dispatch` ThreadPoolExecutor worker threads. Когда `handle_task` возвращается:
+### 1. Root trace loss на короткие диалоги (~33%)
 
-1. Main `user_request` span закрылся → попал в batch.
-2. Child observations от tool worker threads (web_search, rag_search) **ещё не закрылись** — worker thread не успел вернуть результат до того, как main thread сделал force_flush.
-3. Batch отправляется неполный, или Langfuse drop'ает trace когда поздние child spans приходят к уже закрытому trace_id.
+Async batch flush race на коротких диалогах: handle_task возвращает → server принимает следующий request → новый root span overlap'ит trace_id → batch drops старый. `client.flush()` после span помогает, но не до конца.
 
-**Fix требует** одного из:
-- `wait-for-workers` в `ouroboros.tools._dispatch` — ждать `ThreadPoolExecutor.shutdown(wait=True)` перед return из tool_dispatch.
-- OTel `BatchSpanProcessor` config: `schedule_delay_millis=100` + `max_export_batch_size=1` — sync-like экспорт (cost: ~1-2s latency на каждый tool dispatch).
-- Замена batch exporter на `SimpleSpanProcessor` — без батча, но дорого по сети.
+**Fix варианты:**
+- OTel `BatchSpanProcessor` config: меньший `schedule_delay_millis` — sync-like экспорт, но cost на каждый span.
+- Замена batch exporter на `SimpleSpanProcessor` — без батча, дорого по сети.
 
-Все три — нетривиальные изменения в ouroboros core, отложено в **v2.4 backlog**.
+### 2. Orphan tool traces из background tasks
 
-**Прагматика:** для прод-сценария (один WS chat, paced user input) gap гораздо меньше — eval pattern back-to-back диалогов exposed race максимально. Refusal path (~50% типичных off-scope запросов) теперь покрыт.
+`traced_tool` decorator на `skills/neftegaz_analyst/plugin.py` создаёт span при любом вызове tool. Если tool вызывается **минуя** `handle_task` wrap (background scheduler, consolidator, direct skill_exec) — `_trace_context_per_pid` пуст → span создаётся как root trace с `name=tool_name`, `session=None`.
+
+**Fix:** в `traced_tool` при отсутствии `tc` либо skip Langfuse path, либо создать synthetic root user_request span с пометкой `metadata.synthetic=true`. Нетривиально — отложено в v2.4.
+
+**Прагматика:** для прод-сценария (один WS chat, paced user input) gap гораздо меньше, чем в eval. Главный путь — handle_task через WS — теперь даёт полные иерархии.
 
 ## Bundled prod-compat fixes
 
