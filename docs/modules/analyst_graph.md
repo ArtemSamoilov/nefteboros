@@ -54,5 +54,4 @@ JSON-трейс параллельно в `metrics/runs/<ts>/trace.jsonl` (см.
 
 ## Известные ограничения
 
-- Потеря корневого трейса на коротких диалогах ~33% (гонка асинхронного flush'а) — см. changelog [2026-05-11-observability-post-span-flush.md](../changelog/2026-05-11-observability-post-span-flush.md). Mitigation — backlog v2.4.
 - Узлы `forecast_call` и `validate_citations` обёрнуты в графе, но внутренние шаги (поиск калибровки, регекс-парсинг) не разбиваются на под-span'ы.
