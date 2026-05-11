@@ -20,7 +20,7 @@ from ouroboros.provider_models import normalize_anthropic_model_id
 
 log = logging.getLogger(__name__)
 
-DEFAULT_LIGHT_MODEL = "anthropic/claude-sonnet-4.6"
+DEFAULT_LIGHT_MODEL = "openai-compatible::kimi-k2p6"
 
 
 class LocalContextTooLargeError(RuntimeError):
@@ -1769,7 +1769,7 @@ class LLMClient:
         self,
         prompt: str,
         images: List[Dict[str, Any]],
-        model: str = "anthropic/claude-sonnet-4.6",
+        model: str = "openai-compatible::kimi-k2p6",
         max_tokens: int = 4096,
         reasoning_effort: str = "none",
     ) -> Tuple[str, Dict[str, Any]]:
@@ -1818,11 +1818,11 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.7")
+        return os.environ.get("OUROBOROS_MODEL", "openai-compatible::kimi-k2p6")
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.7")
+        main = os.environ.get("OUROBOROS_MODEL", "openai-compatible::kimi-k2p6")
         code = os.environ.get("OUROBOROS_MODEL_CODE", "")
         light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
         models = [main]

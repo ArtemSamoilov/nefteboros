@@ -76,9 +76,47 @@ else:
 
 **Прагматика:** для прод-сценария (один WS chat, paced user input) gap гораздо меньше — eval pattern back-to-back диалогов exposed race максимально. Refusal path (~50% типичных off-scope запросов) теперь покрыт.
 
+## Bundled prod-compat fixes
+
+В этот PR также включены сопутствующие fix'ы, возникшие в том же hot-patch цикле
+2026-05-11 на проде. Без них observability fix сам по себе работает, но
+production deployment ломается:
+
+### `ouroboros/pricing.py` + `safety.py` — aitunnel:: integration
+
+PR #57 (v2.3.4) добавил `aitunnel::` prefix только в `ouroboros/llm.py`
+(`_parse_provider_model`, `_qualified_model_name`, `_resolve_remote_target`).
+Не были обновлены **смежные поверхности**:
+
+- `pricing.py::infer_api_key_type` / `infer_provider_from_model` — без них cost
+  tracking для aitunnel моделей не работал (provider возвращал unknown, fallback
+  на openrouter pricing).
+- `safety.py::_REMOTE_PROVIDER_KEYS` / `_PROVIDER_KEY_ENV` — без них skill exec
+  не получал `AITUNNEL_API_KEY` в env через `_scrub_env`.
+
+### `ouroboros/llm.py` — убраны hardcoded anthropic defaults
+
+`DEFAULT_LIGHT_MODEL` и три callsite `default_model`/`available_models`/vision
+имели hardcoded `anthropic/claude-opus-4.7` / `claude-sonnet-4.6`. На проде
+`ANTHROPIC_API_KEY` не set → дефолты ломали fallback. Заменены на
+`openai-compatible::kimi-k2p6` — тот же provider что в prod `.env`.
+
+### `ouroboros/consolidator.py` — env-driven CONSOLIDATION_MODEL
+
+Был hardcoded `google/gemini-3-flash-preview` (OpenRouter-only). На deployments
+без `OPENROUTER_API_KEY` (как наш prod на Hydra+aitunnel) consolidator падал в
+фоне каждые ~1-2 минуты с "All models are down". Теперь читает
+`OUROBOROS_MODEL_LIGHT` → `OUROBOROS_MODEL` → fallback.
+
+### `.env.example` — AITUNNEL_API_KEY + AITUNNEL_BASE_URL
+
+PR #57 не добавил env-keys в example. Чистый deploy не воспроизводит prod —
+вписан блок с пояснением, что это secondary fallback при отказе Hydra.
+
 ## Связанные
 
 - PR #56 (v2.3.3) — первая итерация flush'а, внутри span (этот PR fix'ит её).
+- PR #57 (v2.3.4) — aitunnel:: в llm.py (этот PR дополняет pricing/safety/.env).
 - PR #51 (v2.1.0, Track F) — observability skeleton.
 - Diagnostic session 2026-05-11 peaceful-einstein — ~6 hot-patch итераций, 5 кругов smoke.
 - Backlog: ouroboros.tools._dispatch wait-for-workers (v2.4).

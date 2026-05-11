@@ -130,7 +130,15 @@ def _normalize_model_identity(model: str) -> str:
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
     """Infer which API key is used based on model name."""
     provider_name = str(provider or "").strip().lower()
-    if provider_name in {"local", "openrouter", "openai", "anthropic", "openai-compatible", "cloudru"}:
+    if provider_name in {
+        "local",
+        "openrouter",
+        "openai",
+        "anthropic",
+        "openai-compatible",
+        "aitunnel",
+        "cloudru",
+    }:
         return provider_name
     raw_model = _normalize_model_name(model)
     if raw_model.startswith("openai::"):
@@ -139,6 +147,8 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
         return "anthropic"
     if raw_model.startswith("openai-compatible::"):
         return "openai-compatible"
+    if raw_model.startswith("aitunnel::"):
+        return "aitunnel"
     if raw_model.startswith("cloudru::"):
         return "cloudru"
     normalized = _normalize_model_identity(raw_model)
@@ -148,6 +158,8 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
         return "openrouter"
     if normalized.startswith("openai-compatible/"):
         return "openai-compatible"
+    if normalized.startswith("aitunnel/"):
+        return "aitunnel"
     if normalized.startswith("cloudru/"):
         return "cloudru"
     if normalized.startswith(("anthropic/", "google/", "openai/", "x-ai/", "qwen/")):
@@ -177,6 +189,8 @@ def infer_provider_from_model(model: str) -> str:
         return "openai"
     if raw.startswith("openai-compatible::"):
         return "openai-compatible"
+    if raw.startswith("aitunnel::"):
+        return "aitunnel"
     if raw.startswith("cloudru::"):
         return "cloudru"
     return "openrouter"

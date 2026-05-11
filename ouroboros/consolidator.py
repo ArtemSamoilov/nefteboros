@@ -33,10 +33,23 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+import os as _os  # late import — section initialization only
+
 BLOCK_SIZE = 100                          # Messages per consolidation block
 MAX_SUMMARY_BLOCKS = 10                   # Compress into era when exceeded
 ERA_COMPRESS_COUNT = 4                    # Oldest blocks to compress per era
-CONSOLIDATION_MODEL = "google/gemini-3-flash-preview"
+
+# Consolidation использует "light" модель (memory summarization — cheap task).
+# По дефолту читаем из OUROBOROS_MODEL_LIGHT (env), иначе из OUROBOROS_MODEL.
+# Это позволяет инсталляциям без OpenRouter ключа (например, prod на Hydra +
+# aitunnel fallback) использовать тот же provider, который уже настроен.
+# Hardcoded `google/gemini-3-flash-preview` (OpenRouter-only) ломал deployments
+# без OPENROUTER_API_KEY — consolidator падал в фоне каждый цикл.
+CONSOLIDATION_MODEL = (
+    _os.environ.get("OUROBOROS_MODEL_LIGHT", "").strip()
+    or _os.environ.get("OUROBOROS_MODEL", "").strip()
+    or "google/gemini-3-flash-preview"  # last-resort default
+)
 CONSOLIDATION_REASONING_EFFORT = "medium"
 MAX_SUMMARY_CHARS = 90000                 # Hard cap preserved from old system
 

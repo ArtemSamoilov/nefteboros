@@ -456,6 +456,7 @@ _REMOTE_PROVIDER_KEYS = (
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_COMPATIBLE_API_KEY",
+    "AITUNNEL_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY",
 )
 
@@ -472,6 +473,7 @@ _PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
+    "aitunnel": "AITUNNEL_API_KEY",
     "cloudru": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
 }
 
