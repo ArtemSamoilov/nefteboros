@@ -1,0 +1,51 @@
+# 04 Tz Forecast Brent 3M
+
+## ТЗ-цитата
+
+> ТЗ §2.5 (буквальная цитата): _«спрогнозируй цену Brent на 3 месяца»_. Также §4.6.4: «вызов расчётного модуля».
+
+**Категория агента:** Forecast — расчётный модуль Brent 3m
+
+## Запрос (canonical под категорию §4.6)
+
+```
+Спрогнозируй цену Brent на 3 месяца.
+```
+
+## Метаданные прогона
+
+- **prod version:** v2.3.5+ (commit `c3c22f6`, PR #48 `fix/auto-enable-web-search`)
+- **server:** `ws://186.246.2.190:8000/ws` (Docker image `nefteboros:dev`, image built 2026-05-11 12:48 UTC)
+- **time (UTC):** 2026-05-11 13:09:53
+- **duration:** 73.3s
+- **client_message_id:** `examples_tz-04_1778504993`
+- **sender_session_id:** `examples_session_tz-04_1778504993`
+- **Langfuse trace:** [`dd8cc6e39dc5dcab0be96c81aff8892b`](https://cloud.langfuse.com/trace/dd8cc6e39dc5dcab0be96c81aff8892b)
+- **tools/skills:** `analyst_query`, `classify_intent`, `forecast_call`, `validate_citations`
+- **observations:** 11
+- **screenshot:** [`screenshots/scenario-tz-04.txt`](../screenshots/scenario-tz-04.txt) — CLI dump (см. ниже)
+
+## Ответ агента (полный, как пришёл по WS)
+
+## Прогноз цены Brent на 3 месяца (август 2026)
+
+**Анкор:** спот на 8 мая 2026 = **$101.29/баррель**.
+
+| Сценарий | Точечная оценка, август 2026 | CI 80% | CI 95% |
+|---|---|---|---|
+| **Base** (shock equilibrium) | **$101.22** | $88.32 – $114.12 | $81.50 – $120.94 |
+
+**Механика модели `[Forecast: ou_regime, scenario=base, CI 80/95%]`:**
+- Mean-reversion к равновесному μ(t) = $99.23, half-life ~4.2 мес. На горизонте 3 мес процесс лишь частично сходится к μ(t), потому точечная оценка практически равна споту.
+- Волатильность σ = 25%/год растягивает CI 95% до ±$20/баррель — широкий диапазон отражает shock-режим (Hormuz/Iran, ADR-0023).
+
+**Важные caveats:**
+- Модель `ou_regime` — не SARIMAX (запрошенный вами метод недоступен без конфигурации бэкенда).
+- `backtest_summary: null` — отсутствует out-of-sample валидация; интервалы — теоретические OU, без подтверждённого покрытия.
+- Прогноз — чистая стат-модель, **без overlay** из отчётов (OPEC WOO, IEA Oil, CRS Iran) и текущего новостного фона (OPEC+ квоты, Hormuz). Реальный риск-диапазон шире.
+
+Источник: `[Forecast: ou_regime, scenario=base, CI 80/95%]` — внутренний расчётный модуль, ADR-0024.
+
+## Прошёл ли сценарий ожидания ТЗ?
+
+Полная цепочка §2.5 ТЗ: classify_intent → forecast_call (method=ou_regime, horizon=3m) → validate_citations → synthesize. В ответе — таблица с central estimate и CI 80%, краткая интерпретация. Note: запрошенный SARIMAX в текущем deployment отсутствует, агент использует ou_regime — но это документировано в RAG-разделе 4 (см. dialogue 04).
