@@ -12,7 +12,7 @@
 - **server:** `ws://186.246.2.190:8000/ws`
 - **WS-клиент:** один `websockets.connect()` на 3 round, общий `sender_session_id = "multi_turn_1778507664"`
 - **total duration:** 147s (R1=76.5s, R2=2.0s, R3=64.3s)
-- **Langfuse traces:** R1 trace отсутствует в выгрузке (Langfuse ingestion lag или пишется в `chat:0` вместо `chat:1` — пока не сматчилось). R2 трейс отсутствует (handle_task на сервере не успел стартовать из-за быстрого WS break). R3 — есть intent classification, но финальный root_span.update() не пришёл.
+- **Langfuse traces:** **R1/R2/R3 trace отсутствуют в выгрузке через 30+ мин после прогона** (повторный фетч за окно `last 3h` сделан в 14:10 UTC — в Langfuse появились только первые 5 tz-сценариев до 13:09:54, после этого момента **0 новых traces** в проекте). Это значит `handle_task.root_span.update()` либо не был вызван (handle_task оборвался без финализации), либо `client.flush()` не успел сработать до закрытия WS-сессии. Это **server-side issue**, не Langfuse ingestion lag.
 
 ## Round 1 — baseline forecast Brent 3m
 
@@ -95,6 +95,7 @@
 **Требует исправления (backlog):**
 - **WS-клиентская break-логика** ломается на коротких continuation-запросах с быстрым task_metrics_event. Fix: НЕ break'аться на task_metrics, только на explicit `done=True` или IDLE timeout > 60s.
 - **Server-side: для multi-turn в одной WS connection** — финальные assistant chunks после task_metrics_event могут теряться (не доходить до клиента). Возможно server закрывает chunk-stream раньше времени.
+- **Server-side observability gap для прерванных WS-сессий:** trace в Langfuse не создаётся, если WS-клиент закрывает connection до того, как `handle_task.root_span.update(output=...)` + `client.flush()` отработают. Empirical: 4 retake-попытки (multi-turn + conflict + leak + retake01) в 13:11–13:25 UTC — **0 новых traces в Langfuse** на момент проверки в 14:10 UTC (30+ мин ingestion window). Для сравнения: первичный прогон 5 ТЗ-сценариев в 13:03–13:11 UTC дал 4 trace (tz-05 отдельный gap). Гипотеза: для multi-tool параллельных тулов с долгим временем работы task_metrics_event и WS-disconnection race-condition'ятся.
 
 ## Backlog v2.4
 
