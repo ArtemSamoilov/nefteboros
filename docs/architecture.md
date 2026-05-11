@@ -152,9 +152,7 @@ classify_intent →
 
 ## Observability (ADR-0024-observability-langfuse)
 
-Серверные трейсы всех узлов LangGraph идут в **Langfuse Cloud** с фиксацией **латентности** и **статуса**. Декораторы `observe(name=...)` навешиваются на узлы в `nefteboros/graphs/analyst_graph.py:build_analyst_graph` через wrap при `add_node` — файлы `nodes/*.py` остаются без декораторов. Entry-points (CLI, ouroboros tool, eval скрипты) используют `invoke_with_trace(graph, state)` для открытия top-level trace на запрос. Параллельно с Langfuse пишется JSON-trace в `metrics/runs/<ts>/trace.jsonl` — backup для demo-режима без Langfuse-аккаунта (`LANGFUSE_ENABLED=false`).
-
-**Cost / tokens / model name — известное ограничение текущей версии.** Вызовы `log_llm_usage(usage)` в синтезе и `llm_disambiguate` существуют, но enrichment поля `provided_model_name` / `usage_details` / `total_cost` в Langfuse generations не доходит — все три остаются `null` (проверено дампом 10 generations). Полная реализация — в плане v2.4 (см. backlog).
+Серверные трейсы всех узлов LangGraph + cost/latency идут в **Langfuse Cloud**. Декораторы `observe(name=...)` навешиваются на узлы в `nefteboros/graphs/analyst_graph.py:build_analyst_graph` через wrap при `add_node` — файлы `nodes/*.py` остаются без декораторов. Entry-points (CLI, ouroboros tool, eval скрипты) используют `invoke_with_trace(graph, state)` для открытия top-level trace на запрос. LLM-вызовы внутри узлов прикрепляют tokens/cost к текущему span'у через `log_llm_usage(usage)` (модуль `nefteboros/observability/`). Параллельно с Langfuse пишется JSON-trace в `metrics/runs/<ts>/trace.jsonl` — backup для demo-режима без Langfuse-аккаунта (`LANGFUSE_ENABLED=false`). Cost считается через иерархию: наши `COST_RATES` (kimi-k2p6, GigaChat-2-Max) → fallback `ouroboros.pricing.estimate_cost` → null.
 
 ## Эволюция
 

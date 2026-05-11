@@ -30,7 +30,7 @@
 **Инструментация есть:**
 
 - `classify_intent` — span (`analyst_graph.py:119-121`). Срабатывает по правилам, без расхода LLM.
-- `llm_disambiguate` — generation span (`analyst_graph.py:122-125`). `log_llm_usage` вызывается в `nefteboros/graphs/nodes/llm_disambiguate.py:184`, но в Langfuse cost / tokens / model name приходят как `null` (latency и статус фиксируются полноценно; enrichment — backlog v2.4).
+- `llm_disambiguate` — generation span (`analyst_graph.py:122-125`). Cost и tokens пишутся через `log_llm_usage` в `nefteboros/graphs/nodes/llm_disambiguate.py:184`.
 
 **Eval-скрипт:** `scripts/eval/eval_intent_classifier.py`:
 - Метрики: `type_accuracy`, `assets_jaccard_mean`, `horizon_match_rate`, precision/recall/F1.
