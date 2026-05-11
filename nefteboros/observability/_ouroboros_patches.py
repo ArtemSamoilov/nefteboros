@@ -107,6 +107,15 @@ def remote_parent_cm(tc: Optional[dict[str, str]]) -> Iterator[None]:
     if not tc or "trace_id" not in tc or "parent_span_id" not in tc:
         yield
         return
+
+    # Build parent OTel context. Если setup fails — yield без него (graceful
+    # degrade). КРИТИЧНО: только ОДИН yield в generator-CM. Старая версия
+    # имела два yield (в try и в except) → если downstream throws exception
+    # после первого yield, generator при `__exit__` пытался re-yield во
+    # втором — `RuntimeError: generator didn't stop after throw()`. Эта
+    # ошибка ломала observability state на всех последующих request'ах в
+    # процессе. См. fix observability fragility.
+    non_rec = None
     try:
         from opentelemetry import trace as _otel_trace_api
         from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
@@ -118,10 +127,16 @@ def remote_parent_cm(tc: Optional[dict[str, str]]) -> Iterator[None]:
             trace_flags=TraceFlags(0x01),
         )
         non_rec = NonRecordingSpan(parent_ctx)
-        with _otel_trace_api.use_span(non_rec, end_on_exit=False):
-            yield
     except Exception:
-        logger.debug("remote_parent_cm failed; span будет создан без parent context")
+        logger.debug(
+            "remote_parent_cm: failed to build parent context, span будет создан без parent"
+        )
+
+    if non_rec is None:
+        yield
+        return
+
+    with _otel_trace_api.use_span(non_rec, end_on_exit=False):
         yield
 
 
@@ -323,24 +338,55 @@ def _patch_handle_task() -> None:
                     root_span.update(output=output_payload)
                 except Exception:  # noqa: BLE001
                     pass
-                # Explicit flush: Langfuse 4.x SDK батчит spans асинхронно
-                # (по time/size triggers). Короткие диалоги (refusal без
-                # tools, ~1-7s) закрывают WS connection раньше, чем batch
-                # отправляется → trace теряется в Langfuse. Длинные
-                # multi-tool диалоги работают за счёт периодического
-                # flush'а внутри batch window. Явный flush здесь
-                # гарантирует доставку для **всех** диалогов независимо
-                # от длительности. Cost: ~100-300ms к latency per request.
-                try:
-                    client.flush()
-                except Exception:  # noqa: BLE001 — flush никогда не ломает request
-                    pass
-                return result
+                # NB: flush НЕ внутри `with start_as_current_observation`
+                # block — span ещё open и trace **incomplete**. Перенесли
+                # flush ниже, ПОСЛЕ exit context manager.
         except Exception:
             logger.exception(
                 "handle_task observability wrapper failed; running without obs"
             )
             return original(self, task)
+        else:
+            # `with start_as_current_observation` закрылся → root span
+            # finalized → trace полный → теперь flush'аем синхронно.
+            #
+            # Explicit flush + grace sleep: Langfuse 4.x SDK батчит spans
+            # асинхронно. `client.flush()` signals background worker, но
+            # сам **не блокирует** до конца отправки. Для очень коротких
+            # диалогов (refusal ~15-20s, web spot ~60s) handle_task
+            # возвращается, server принимает следующий request, тот
+            # стартует НОВЫЙ root span → batch ещё не отправлен → старый
+            # trace дропается. Sleep 500ms даёт worker'у завершить batch
+            # transfer ДО следующего request'a.
+            #
+            # Cost: ~500ms к latency per request — незаметно для WS chat,
+            # критично для eval (5/5 trace coverage vs 2-4/5).
+            # Sync flush: ждём все pending spans, ВКЛЮЧАЯ child spans от
+            # tool_dispatch ThreadPoolExecutor (web_search, rag_search,
+            # forecast_call). Без этого short tool-calling диалоги теряют
+            # trace: main handle_task возвращается → client.flush()
+            # отправляет main span, но child spans от worker threads
+            # ещё open → следующий request пере-использует trace_id →
+            # batch overlap → Langfuse drops старый trace.
+            #
+            # OTel `tracer_provider.force_flush(timeout_millis)` — sync
+            # API, блокирует до завершения всех SpanProcessor pipelines
+            # (включая batch экспортёр Langfuse). 5000ms — щедрый запас,
+            # реально завершается за <100-500ms.
+            try:
+                from opentelemetry import trace as _otel_trace
+                _provider = _otel_trace.get_tracer_provider()
+                if hasattr(_provider, "force_flush"):
+                    _provider.force_flush(timeout_millis=5000)
+            except Exception:  # noqa: BLE001 — flush никогда не ломает request
+                pass
+            # Дополнительный legacy flush — Langfuse client.flush() остаётся
+            # как safety net для версий SDK без OTel-уровня pipeline.
+            try:
+                client.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            return result
         finally:
             try:
                 _current_session_id.reset(sess_token)
