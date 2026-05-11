@@ -1,6 +1,6 @@
 """Cost estimation для LLM-вызовов.
 
-Иерархия (см. ADR-0025 §«Cost calculation»):
+Иерархия (см. ADR-0024-observability-langfuse §«Cost calculation»):
 
 1. Наши захардкоженные ставки `COST_RATES` — для моделей, специфичных нашему
    стеку (kimi-k2p6 через Hydra, GigaChat-2-Max). Приоритет, потому что ouroboros

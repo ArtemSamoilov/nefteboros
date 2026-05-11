@@ -1,6 +1,6 @@
 """Tracer — JSONL writer для observability.
 
-См. ADR-0025.
+См. ADR-0024-observability-langfuse.
 
 **Scope:** offline backup в `metrics/runs/<ts>/trace.jsonl` для дебага
 без Langfuse Cloud. Langfuse-сторона делается через native `@observe` +

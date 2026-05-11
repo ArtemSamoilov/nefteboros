@@ -147,7 +147,7 @@ async def _call_llm(system: str, user: str) -> str:
     можно перевести synthesize на router profile=primary и удалить ouroboros.llm
     из этого узла.
 
-    **Observability** (см. ADR-0025): usage от ouroboros
+    **Observability** (см. ADR-0024-observability-langfuse): usage от ouroboros
     (prompt_tokens / completion_tokens / cost / resolved_model / provider)
     логируется через `nefteboros.observability.log_llm_usage` — прикрепляется
     к текущему generation-span'у узла. No-op если span context отсутствует
@@ -180,7 +180,7 @@ async def _call_llm(system: str, user: str) -> str:
         logger.exception("synthesize: LLM call failed")
         return f"[LLM error: {type(exc).__name__}: {exc}]"
 
-    # Observability: tokens/cost → текущий span (ADR-0025). No-op если
+    # Observability: tokens/cost → текущий span (ADR-0024-observability-langfuse). No-op если
     # span_context отсутствует (unit-test, вызов узла напрямую).
     try:
         from nefteboros.observability import log_llm_usage
