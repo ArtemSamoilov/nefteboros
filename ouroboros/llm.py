@@ -302,6 +302,7 @@ class LLMClient:
             ("anthropic::", "anthropic"),
             ("cloudru::", "cloudru"),
             ("openai-compatible::", "openai-compatible"),
+            ("aitunnel::", "aitunnel"),
             ("openrouter::", "openrouter"),
         ):
             if model_name.startswith(prefix):
@@ -318,6 +319,8 @@ class LLMClient:
             return f"anthropic/{resolved_model}"
         if provider == "cloudru":
             return f"cloudru/{resolved_model}"
+        if provider == "aitunnel":
+            return f"aitunnel/{resolved_model}"
         return f"openai-compatible/{resolved_model}"
 
     def _resolve_remote_target(self, model: str) -> Dict[str, Any]:
@@ -374,6 +377,26 @@ class LLMClient:
                 "usage_model": usage_model,
                 "api_key": compatible_key or legacy_key,
                 "base_url": compatible_base_url or legacy_base_url,
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "aitunnel":
+            # AITunnel — российский OpenAI-compatible-прокси, используется
+            # как secondary fallback при отказе Hydra (см. ADR / changelog
+            # 2026-05-11). Отдельные env vars от openai-compatible, чтобы
+            # primary и fallback в OUROBOROS_MODEL[_FALLBACK] могли
+            # одновременно ссылаться на разные провайдеры.
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": (os.environ.get("AITUNNEL_API_KEY", "") or "").strip(),
+                "base_url": (
+                    (os.environ.get("AITUNNEL_BASE_URL", "") or "").strip()
+                    or "https://api.aitunnel.ru/v1"
+                ),
                 "default_headers": {},
                 "supports_openrouter_extensions": False,
                 "supports_generation_cost": False,
@@ -604,7 +627,7 @@ class LLMClient:
                 temperature,
                 no_proxy,
             )
-        use_stream = target.get("provider") == "openai-compatible"
+        use_stream = target.get("provider") in ("openai-compatible", "aitunnel")
         if no_proxy:
             import httpx
             from openai import AsyncOpenAI
@@ -1576,7 +1599,7 @@ class LLMClient:
         # non-stream max_tokens cap at 4096 with a hard 400, and ``delta.reasoning_content``
         # vendor extension is silently dropped by the standard SDK accumulator.
         # See ``chat_async`` docstring for full context.
-        use_stream = target.get("provider") == "openai-compatible"
+        use_stream = target.get("provider") in ("openai-compatible", "aitunnel")
 
         if no_proxy:
             import httpx
