@@ -136,7 +136,7 @@ docker compose -f deploy/docker-compose.yml up
 | Web search | (нет выделенного скрипта — косвенно через e2e) | — | — |
 | End-to-end | success rate, citation correctness, structure, refusal correctness | `scripts/eval/eval_e2e.py` | `datasets/e2e_dialogues.jsonl` |
 
-**Релиз v2.3.5, baseline (100 диалогов, реальный прогон):** success=0.568, cite=0.181, struct=0.528, refusal=0.947. Полный отчёт по метрикам — [docs/eval-results-v2.3.5.md](docs/eval-results-v2.3.5.md) *(публикуется отдельной сессией, плейсхолдер)*.
+**Baseline (v2.0.0, 100 диалогов, последний замеренный реальный прогон):** success=0.568, cite=0.181, struct=0.528, refusal=0.947. На v2.3.5 — replication eval в процессе, полный отчёт по метрикам — [docs/eval-results-v2.3.5.md](docs/eval-results-v2.3.5.md) *(плейсхолдер, публикуется отдельной сессией)*.
 
 **Известное ограничение:** оценщик цитирования (`scripts/eval/eval_citations.py`) — заглушка (`raise NotImplementedError`), регрессионный тест offline отсутствует. Baseline `cite=0.181` измерен через e2e-eval, не через выделенный citations validator. Полная реализация — в плане v2.4 (Track D6).
 
