@@ -4,7 +4,7 @@
 
 **Summary:** Запрос на прогноз 6m. Агент: classify_intent → forecast_call (модель `ou_regime`) → validate_citations → synthesize. После PR #48 web_search автоматически подключается рядом с forecast для актуализации текущего спота.
 
-> ⚠ В ответе присутствует тот же presentation-layer leak validate_citations, что описан в диалоге 05 («…помечены как потенциально «галлюцинированные цитаты» — метаданные pipeline не прошли внешнюю валидацию»). Systematic regression (10/10 forecast traces за 7 дней) — backlog v2.4.
+> ℹ Этот trace — **исторический snapshot v2.3.5+** (до fix'а PR #68). В ответе видна строка «галлюцинированные цитаты — метаданные pipeline не прошли внешнюю валидацию» — presentation-layer leak validate_citations. Fix вышел в **v2.3.6** (commit `582d921`), верификация в [диалоге 05](05-multi-tool-sanctions-forecast.md): 0/6 leak-маркеров на свежем v2.3.6 trace.
 
 ## Метаданные
 

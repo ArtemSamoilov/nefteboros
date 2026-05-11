@@ -24,13 +24,13 @@
 | 2 | [`02-combo-rag-web.md`](dialogues/02-combo-rag-web.md) | Combo (§4.6.3) | [`8e38a759…`](https://cloud.langfuse.com/trace/8e38a759ca2352dea5ebd97dbd6f6a4a) | rag_search + web_search |
 | 3 | [`03-forecast-brent-6m-auto-web.md`](dialogues/03-forecast-brent-6m-auto-web.md) | Forecast (§4.6.4) | [`24d4dfe6…`](https://cloud.langfuse.com/trace/24d4dfe6124e9343e9eada8bb5bed47e) | analyst_query + classify_intent + forecast_call + web_search + validate_citations |
 | 4 | [`04-forecast-sarimax-honest-limitation.md`](dialogues/04-forecast-sarimax-honest-limitation.md) | Forecast (§4.6.4) с явным declaration ограничения | [`07392f8e…`](https://cloud.langfuse.com/trace/07392f8ecdd92dbe3ea10965a5d5c7fb) | analyst_query + classify_intent + forecast_call + validate_citations |
-| 5 | [`05-multi-tool-sanctions-forecast.md`](dialogues/05-multi-tool-sanctions-forecast.md) | **Bonus** — многоинструментный (RAG + Web + Forecast) | [`ba81edd9…`](https://cloud.langfuse.com/trace/ba81edd9587ef3446f3f920c98b8e4cc) | analyst_query + classify_intent + forecast_call + web_search + validate_citations |
+| 5 | [`05-multi-tool-sanctions-forecast.md`](dialogues/05-multi-tool-sanctions-forecast.md) | **Bonus** — многоинструментный (Forecast + Web + classify_intent + validate_citations) | [`5d65a441…`](https://cloud.langfuse.com/trace/5d65a441d58842dea2bc372f7412b293) (v2.3.6 retake) | analyst_query + classify_intent + forecast_call + web_search + validate_citations |
 | 6 | [`06-web-only-current-brent.md`](dialogues/06-web-only-current-brent.md) | Web (§4.6.2) | [`9263be9d…`](https://cloud.langfuse.com/trace/9263be9dbd02716e8b11bb0d416e00a3) | web_search |
 | 7 | [`07-refusal-correct-handling.md`](dialogues/07-refusal-correct-handling.md) | Refusal (§4.6.5) (автоматический прогон, trace artifact) | _(no trace в этом прогоне)_ | _(none)_ |
 
 > ℹ Диалог 7 — корректный отказ на короткий out-of-domain запрос; в данном WS-прогоне trace в Langfuse не подтянулся — артефакт автоматического теста (short refusal + WS close раньше async flush). В реальных пользовательских сессиях через web UI trace ловится. Архитектурный контекст: [`docs/changelog/2026-05-10-wsrunner-eval-observability.md`](../docs/changelog/2026-05-10-wsrunner-eval-observability.md).
 >
-> ⚠ **Известная regression presentation layer (диалоги 03/04/05):** в финальном ответе forecast-запросов присутствует строка про «галлюцинированные цитаты — метаданные pipeline не прошли внешнюю валидацию». Verified **systematic** — в 10/10 forecast traces за 7 дней. Backlog v2.4: фильтр validate_citations warnings перед user-facing answer.
+> ✅ **Presentation-layer leak validate_citations исправлен в v2.3.6** (PR #68 `fix/system-prompt-no-meta-warnings`, commit `582d921`). Раньше в forecast-ответах присутствовала фраза «галлюцинированные цитаты — метаданные pipeline не прошли внешнюю валидацию» (verified systematic, 10/10 forecast traces на v2.3.5+). Диалог 05 пересняли на v2.3.6 — verified clean (0/6 leak-маркеров). Диалоги 03/04 сохранены на старом trace (v2.3.5+) как **исторический snapshot до fix'а** — в их `Summary` помечено явно.
 
 ---
 

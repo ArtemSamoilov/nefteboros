@@ -4,7 +4,7 @@
 
 **Summary:** Пользователь явно просит SARIMAX. Агент возвращает прогноз через `ou_regime` (доступный метод) и **в первом блоке ответа** явно отмечает: «SARIMAX недоступен; использован ou_regime». Без скрытых подмен.
 
-> ⚠ В разделе «Ключевые ограничения» ответа присутствует тот же presentation-layer leak validate_citations, что описан в диалоге 05 — systematic regression (10/10 forecast traces) → backlog v2.4.
+> ℹ Этот trace — **исторический snapshot v2.3.5+** (до fix'а PR #68). В разделе «Ключевые ограничения» виден presentation-layer leak validate_citations (тот же что в [диалоге 03](03-forecast-brent-6m-auto-web.md)). Fix вышел в **v2.3.6** (commit `582d921`), верификация в [диалоге 05](05-multi-tool-sanctions-forecast.md): 0/6 leak-маркеров на свежем v2.3.6 trace.
 
 ## Метаданные
 
