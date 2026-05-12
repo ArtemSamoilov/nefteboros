@@ -800,11 +800,13 @@ def save_run(
     *,
     runner_name: str,
     dataset_path: Path,
+    partial_done: Optional[int] = None,
 ) -> Path:
     METRICS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     commit = _git_short_commit()
-    out_path = METRICS_RUNS_DIR / f"{timestamp}_e2e_{runner_name}_{commit}.json"
+    suffix = f"_partial_{partial_done:03d}" if partial_done is not None else ""
+    out_path = METRICS_RUNS_DIR / f"{timestamp}_e2e_{runner_name}_{commit}{suffix}.json"
     # `relative_to` падает с ValueError, если dataset вне REPO_ROOT
     # (subset из /tmp, custom path); fallback на absolute string.
     try:
@@ -856,7 +858,11 @@ def _print_summary(metrics: dict) -> None:
 
 
 async def _run_all(
-    runner: AgentRunner, dialogues: list[dict]
+    runner: AgentRunner,
+    dialogues: list[dict],
+    *,
+    checkpoint_cb=None,
+    checkpoint_every: int = 10,
 ) -> list[DialogueScore]:
     """Sequential runner с inter-dialogue паузой.
 
@@ -866,12 +872,26 @@ async def _run_all(
     следующий dialogue стартует <1s после → next root span overlap →
     batch drops старый trace. С паузой 3s — flush успевает (interval
     Langfuse SDK ~1s + network).
+
+    ``checkpoint_cb(scores, done)`` вызывается каждые ``checkpoint_every``
+    диалогов (не на последнем — финальный save делает main). Защита от
+    потери метрик если процесс убит в середине прогона.
     """
     INTER_DIALOGUE_SLEEP_S = 3.0
     scores = []
     for i, d in enumerate(dialogues):
         result = await runner.run(d)
         scores.append(score_dialogue(d, result))
+        done = i + 1
+        if (
+            checkpoint_cb is not None
+            and done % checkpoint_every == 0
+            and done < len(dialogues)
+        ):
+            try:
+                checkpoint_cb(list(scores), done)
+            except Exception:
+                logger.exception("checkpoint_cb failed at %d", done)
         # Не sleep после последнего.
         if i < len(dialogues) - 1:
             await asyncio.sleep(INTER_DIALOGUE_SLEEP_S)
@@ -948,7 +968,30 @@ def main() -> int:
         runner = WSRunner(server_url=args.ws_url)
         runner_name = "ws"
 
-    scores = asyncio.run(_run_all(runner, dialogues))
+    def _checkpoint(scores_snap: list[DialogueScore], done: int) -> None:
+        if args.no_save:
+            return
+        partial_metrics = aggregate(scores_snap)
+        save_run(
+            partial_metrics,
+            scores_snap,
+            runner_name=runner_name,
+            dataset_path=dataset_path,
+            partial_done=done,
+        )
+        m = partial_metrics["all"]
+        print(
+            f"[checkpoint {done}/{len(dialogues)}] "
+            f"success={m['success_rate']} "
+            f"cite={m['citation_correctness']} "
+            f"struct={m['structure_adherence']} "
+            f"refusal={m['refusal_rate']}",
+            flush=True,
+        )
+
+    scores = asyncio.run(
+        _run_all(runner, dialogues, checkpoint_cb=_checkpoint, checkpoint_every=10)
+    )
 
     if args.verbose:
         for s in scores:
