@@ -31,6 +31,7 @@ Snapshot 2026-05-08 — заморожен в CURRENT_STATE_2026_05; обнов�
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal, Optional
@@ -392,6 +393,202 @@ def get_flags_for_scenario(scenario_name: ScenarioName) -> dict[str, str]:
     return FLAGS_DECOMPOSITION.get(scenario_name, {})
 
 
+# =============================================================================
+# Flag-driven μ recomputation — детерминированная цепочка (ADR-0025)
+# =============================================================================
+# Делает геополитические флаги РЕАЛЬНЫМ детерминированным входом μ (а не только
+# текстом FLAGS_DECOMPOSITION). Цепочка:
+#
+#   состояния флагов → Σ Δmbpd (DRIVERS) → × (−$12/bbl Kilian) → μ_brent
+#   производные нефти (wti/urals/espo/blend) → аффинно от μ_brent
+#
+# μ считает ДЕТЕРМИНИРОВАННАЯ формула из экспертной таблицы — LLM здесь НЕ
+# участвует (классификация состояний флагов — отдельный этап/воркер).
+#
+# base — особый случай: anchored к текущему equilibrium/споту (μ_base из
+# ASSET_PARAMS), НЕ «calm − дельты» (Σ=0 ⇒ возврат замороженной μ_base).
+#
+# Полная карта решений, восстановление baseline и разрешение противоречия
+# калибровки ADR-0024 ($89 vs $104 baseline) — docs/adr/0025-flags-to-mu.md.
+
+KILIAN_USD_PER_MBPD: float = 12.0
+"""Эластичность цены нефти к устойчивому supply-сдвигу (Kilian 2009).
+
+# source: ADR-0023 §Q2 коридор $10–15/bbl per 1 mbpd; Goldman severe implicit
+# $12–13 ($115 vs $90 при +2 mbpd persistent loss); ADR-0024 §«Mapping flags».
+"""
+
+CALM_BASELINE_BRENT: float = 89.2
+"""Calm-baseline μ Brent (USD/bbl) — якорь цепочки для bear/bull.
+
+# source: ADR-0024 §«Mapping flags»: μ_bear = baseline − Σ·$12. Точное значение
+# = μ_bear(70) + 1.6·12 = 89.2 (ADR/ТЗ округляют до $89). Это фитируемый якорь
+# под сходимость bear, НЕ независимая «calm цена» (bear $70 ниже неё). base сюда
+# НЕ входит (anchored отдельно). См. ADR-0025 §«Восстановление baseline».
+"""
+
+OIL_ASSETS: frozenset[str] = frozenset(
+    {"brent", "wti", "urals", "espo", "urals_minfin_blend"}
+)
+"""Активы с flag-driven μ — ТОЛЬКО нефть (v1). Газ (henry_hub/ttf) и equity
+(moexog/gazp/nvtk) сохраняют ручную калибровку ASSET_PARAMS: у них другая
+driver-логика (см. ADR-0025 §Non-goals)."""
+
+
+# Δmbpd к глобальному supply-demand БАЛАНСУ нефти относительно текущего/base
+# состояния. Знак: + = профицит (цена вниз), − = дефицит (цена вверх). Базовое
+# (current) состояние каждого драйвера = 0 (точка отсчёта). Каждое значение с
+# # source; при новых данных — правка в одном месте.
+DRIVERS: dict[str, dict[str, float]] = {
+    "hormuz": {
+        "blocked": 0.0,            # current/base reference   # source: ADR-0023 §Q2
+        "partial_reopen": +1.5,    # source: ADR-0023 §Q2
+        "full_reopen": +3.0,       # source: ADR-0023 §Q2
+        "partial_closure": -3.27,  # калибровано под сходимость μ_bull=$120 (ADR-0025):
+                                   # между −2 прозы и −5 таблицы ADR-0024 §Mapping (внутр. противоречие ADR)
+        "full_closure": -5.0,      # source: ADR-0023 §Q2 (what-if, не в bull-пресете)
+    },
+    "iran": {
+        "maximum_pressure_active": 0.0,  # current  # source: ADR-0023 §Q2
+        "partial_lift": +0.6,            # source: ADR-0023 §Q2
+        "full_lift": +1.2,               # source: ADR-0023 §Q2
+        "further_tightening": -0.2,      # source: ADR-0023 §Q2
+    },
+    "opec_plus": {
+        "gradual": 0.0,        # current (+206k bpd/мес unwind)  # source: ADR-0023 §Q2
+        "accelerated": +0.5,   # source: scenarios.FLAGS_DECOMPOSITION bull «accelerated +0.5»
+        "extended": -0.5,      # re-tighten cuts, защита цен  # source: ADR-0023 §Q2
+    },
+    "russia_cap": {
+        "active": 0.0,              # current ($47.60/$44.10)  # source: ADR-0023 §Q2
+        "tightened_dynamic": 0.0,   # price effect, НЕ volume   # source: ADR-0023 §Q2
+        "removed": +0.5,            # Russian export normalizes  # source: ADR-0023 §Q2
+    },
+    "china_demand": {
+        "base": 0.0,    # current (+0.2 mbpd y/y per IEA)  # source: ADR-0023 §Q2
+        "weak": +0.4,   # −0.4 mbpd DEMAND ⇒ +0.4 к балансу (профицит)  # source: ADR-0023 §Q2 (demand→balance sign-flip)
+        "strong": -0.4, # +0.4 mbpd demand ⇒ дефицит  # source: ADR-0023 §Q2
+    },
+}
+
+# Текущее (base) состояние каждого драйвера — точка отсчёта Σ Δmbpd.
+DRIVER_BASE_STATES: dict[str, str] = {
+    "hormuz": "blocked",
+    "iran": "maximum_pressure_active",
+    "opec_plus": "gradual",
+    "russia_cap": "active",
+    "china_demand": "base",
+}
+
+# Преднастроенные наборы флагов, соответствующие ASSET_PARAMS scenarios.
+# base = current shock; bear = de-escalation (+1.6 mbpd); bull = escalation (−2.57).
+FLAG_PRESETS: dict[ScenarioName, dict[str, str]] = {
+    "base": dict(DRIVER_BASE_STATES),
+    "bear": {
+        "hormuz": "partial_reopen",
+        "iran": "partial_lift",
+        "opec_plus": "extended",
+        "russia_cap": "active",
+        "china_demand": "base",
+    },
+    "bull": {
+        "hormuz": "partial_closure",
+        "iran": "further_tightening",
+        "opec_plus": "accelerated",
+        "russia_cap": "tightened_dynamic",
+        "china_demand": "weak",
+    },
+}
+
+# Производные нефти: μ_asset = α·μ_brent + β (аффинно к chain-Brent). α,β
+# подогнаны под (bear, bull) замороженные μ → bear точно, bull ≤$0.05. Физика:
+# α<1 у urals/blend = санкционный дисконт ширится с ценой Brent ($8→$25). base
+# — anchored (особый случай), в аффинной карте не участвует.
+# # source: ASSET_PARAMS + spread-комментарии в ASSET_PARAMS (urals/espo/blend).
+_DERIVED_OIL_AFFINE: dict[str, tuple[float, float]] = {
+    "wti": (0.98, -2.6),                  # bear 70→66, bull 120→115 (~$5 premium)
+    "urals": (0.66, 15.8),                # bear 70→62, bull 120→95 (дисконт 8→25)
+    "espo": (0.96, -2.2),                 # bear 70→65, bull 120→113
+    "urals_minfin_blend": (0.72, 12.6),   # bear 70→63, bull 120→99 (≈0.78·urals+0.22·espo)
+}
+
+
+def supply_balance_from_flags(flag_states: Mapping[str, str]) -> float:
+    """Σ Δmbpd по флагам относительно текущего/base состояния (+ = профицит).
+
+    Неуказанные драйверы трактуются в base-состоянии (Δ=0).
+
+    Raises:
+        ValueError: неизвестный driver или state.
+    """
+    total = 0.0
+    for driver, state in flag_states.items():
+        if driver not in DRIVERS:
+            raise ValueError(
+                f"Unknown driver {driver!r}. Valid: {sorted(DRIVERS)}."
+            )
+        table = DRIVERS[driver]
+        if state not in table:
+            raise ValueError(
+                f"Unknown state {state!r} for driver {driver!r}. "
+                f"Valid: {sorted(table)}."
+            )
+        total += table[state]
+    return total
+
+
+def compute_mu_from_flags(asset: str, flag_states: Mapping[str, str]) -> float:
+    """Детерминированный пересчёт μ (long-run target) из состояний флагов.
+
+    Цепочка (ADR-0025): Σ Δmbpd (DRIVERS) → × (−Kilian) → μ_brent; производные
+    нефти аффинно от μ_brent. base (Σ=0) — anchored к ASSET_PARAMS (особый
+    случай, «не calm − дельты»).
+
+    Args:
+        asset: один из OIL_ASSETS (ТОЛЬКО нефть в v1).
+        flag_states: {driver: state}; неуказанные драйверы = base-состояние.
+
+    Returns:
+        μ_0 (USD/bbl) для (asset, flag_states).
+
+    Raises:
+        ValueError: asset не нефтяной, либо неизвестный driver/state.
+    """
+    if asset not in OIL_ASSETS:
+        raise ValueError(
+            f"compute_mu_from_flags поддерживает только нефть {sorted(OIL_ASSETS)}; "
+            f"got {asset!r}. Газ/equity сохраняют ручную калибровку (ADR-0024)."
+        )
+    balance = supply_balance_from_flags(flag_states)
+    # base equilibrium — anchored (особый случай, не через формулу):
+    if balance == 0.0:
+        return ASSET_PARAMS[asset]["base"].mu_0
+    mu_brent = CALM_BASELINE_BRENT - KILIAN_USD_PER_MBPD * balance
+    if asset == "brent":
+        return mu_brent
+    alpha, beta = _DERIVED_OIL_AFFINE[asset]
+    return alpha * mu_brent + beta
+
+
+def ou_params_with_flag_mu(
+    asset: str,
+    scenario: ScenarioName,
+    flag_states: Mapping[str, str],
+) -> OUParams:
+    """OUParams со θ/σ/infl из (asset, scenario) пресета и μ_0, пересчитанной из флагов.
+
+    v1: флаги двигают ТОЛЬКО μ (long-run target). θ/σ/inflation берутся из
+    scenario-пресета без изменений (non-goal: калибровка θ/σ — см. ADR-0025).
+    """
+    preset = get_ou_params(asset, scenario)
+    return OUParams(
+        mu_0=compute_mu_from_flags(asset, flag_states),
+        theta=preset.theta,
+        sigma=preset.sigma,
+        inflation=preset.inflation,
+    )
+
+
 __all__ = [
     "AS_OF_DATE",
     "REVIEW_AFTER_DAYS",
@@ -411,4 +608,14 @@ __all__ = [
     "parse_scenario",
     "scenario_label",
     "get_flags_for_scenario",
+    # flag-driven μ chain (ADR-0025)
+    "KILIAN_USD_PER_MBPD",
+    "CALM_BASELINE_BRENT",
+    "OIL_ASSETS",
+    "DRIVERS",
+    "DRIVER_BASE_STATES",
+    "FLAG_PRESETS",
+    "supply_balance_from_flags",
+    "compute_mu_from_flags",
+    "ou_params_with_flag_mu",
 ]

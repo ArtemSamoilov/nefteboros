@@ -27,6 +27,7 @@ import logging
 import math
 import random as _stdlib_random
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Optional, Union
 
@@ -41,13 +42,16 @@ from nefteboros.forecast.registry import get_asset
 from nefteboros.forecast.scenarios import (
     AS_OF_DATE,
     FORECAST_RANDOM_STATE,
+    OIL_ASSETS,
     OUForecast,
     ScenarioParams,
     compute_ou_forecast,
     get_ou_params,
     is_scenario_applicable,
+    ou_params_with_flag_mu,
     parse_scenario,
     scenario_label,
+    supply_balance_from_flags,
 )
 from nefteboros.forecast.schema import (
     ConfidenceInterval,
@@ -77,6 +81,7 @@ def forecast(
     horizon: Union[str, Horizon],
     *,
     scenario: Optional[Union[str, ScenarioParams]] = None,
+    flag_states: Optional[Mapping[str, str]] = None,
     history_years: float = 5.0,
     use_cache: bool = True,
     method: Optional[Union[str, ModelMethod]] = None,  # backward-compat, ignored in OU path
@@ -88,6 +93,11 @@ def forecast(
                henry_hub, ttf, moexog, gazp, nvtk).
         horizon: "1m" / "3m" / "6m" / "12m". >= 18m → ForecastRefusal.
         scenario: None | "base" | "bear" | "bull" | ScenarioParams. None == "base".
+        flag_states: опциональная карта {driver: state} геополитических флагов
+               (ADR-0025). None (default) → замороженные μ из ASSET_PARAMS
+               (поведение НЕ меняется). Задан → μ пересчитывается детерминированной
+               цепочкой DRIVERS → Σ Δmbpd → Kilian; θ/σ остаются из scenario.
+               ТОЛЬКО для нефти; для газа/equity → ForecastRefusal.
         history_years: окно для fetch spot (последняя точка). Default 5y.
         use_cache: использовать локальный кеш данных.
         method: backward-compat parameter (ignored — OU не имеет alternative methods).
@@ -121,6 +131,18 @@ def forecast(
             ),
         )
 
+    # 3b. flag_states (ADR-0025) — детерминированная цепочка μ ТОЛЬКО для нефти
+    if flag_states is not None and asset not in OIL_ASSETS:
+        return ForecastRefusal(
+            asset=asset,
+            requested_horizon_months=h.months,
+            reason=(
+                f"flag_states (геополитическая цепочка μ, ADR-0025) поддерживается "
+                f"только для нефти {sorted(OIL_ASSETS)}; got {asset!r}. Газ/equity "
+                f"сохраняют ручную калибровку — используй scenario= без flag_states."
+            ),
+        )
+
     # 4. Validate asset registry
     meta = get_asset(asset)
 
@@ -132,8 +154,14 @@ def forecast(
     # 5. Fetch spot (last observation) — используется как S_0 для OU
     spot, history = _fetch_spot_and_history(asset, meta, history_years, use_cache)
 
-    # 6. Get OU params and compute forecast
-    ou_params = get_ou_params(asset, scenario_params.name)
+    # 6. Get OU params and compute forecast.
+    #    flag_states пересчитывает μ через детерминированную цепочку (ADR-0025);
+    #    θ/σ/infl остаются из scenario-пресета. flag_states=None (default) →
+    #    замороженные μ (snapshot AS_OF_DATE) — поведение forecast() НЕ меняется.
+    if flag_states is None:
+        ou_params = get_ou_params(asset, scenario_params.name)
+    else:
+        ou_params = ou_params_with_flag_mu(asset, scenario_params.name, flag_states)
     clip_negative = meta.unit in ("USD/bbl", "USD/MMBtu", "EUR/MWh", "RUB", "pts (RUB-weighted)")
     ou_result = compute_ou_forecast(
         spot=spot,
@@ -185,6 +213,13 @@ def forecast(
             "ou_sigma": ou_params.sigma,
             "ou_inflation": ou_params.inflation,
             "ou_raw_anchor": ou_result.raw_anchor,
+            # flag-driven μ chain diagnostics (ADR-0025); None если флаги не заданы
+            "flag_states": dict(flag_states) if flag_states is not None else None,
+            "flag_supply_balance_mbpd": (
+                supply_balance_from_flags(flag_states)
+                if flag_states is not None
+                else None
+            ),
         },
     )
 
