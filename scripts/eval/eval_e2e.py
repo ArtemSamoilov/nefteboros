@@ -325,6 +325,56 @@ class WSRunner:
             "EVAL_WS_URL", "ws://localhost:8000/ws"
         )
         self._timeout = timeout_seconds
+        self._clear_url = self._http_base_from_ws(self._url) + "/api/chat/clear"
+
+    @staticmethod
+    def _http_base_from_ws(ws_url: str) -> str:
+        """ws://host:port/ws → http://host:port (для HTTP control endpoints)."""
+        base = ws_url
+        if base.startswith("ws://"):
+            base = "http://" + base[len("ws://"):]
+        elif base.startswith("wss://"):
+            base = "https://" + base[len("wss://"):]
+        base = base.rstrip("/")
+        if base.endswith("/ws"):
+            base = base[: -len("/ws")]
+        return base
+
+    async def _clear_chat_history(self) -> None:
+        """POST /api/chat/clear — обрезает серверный chat.jsonl + progress.jsonl.
+
+        Делает каждый диалог изолированным: агент не наследует "Recent chat"
+        предыдущих диалогов. Loopback (localhost) — без auth. Ошибка не валит
+        диалог (graceful), но логируется как предупреждение о возможной
+        контаминации.
+        """
+        # Escape hatch: EVAL_CHAT_ISOLATION=0 отключает очистку (для
+        # diagnostics / A-B и для будущего genuine multi-turn eval, где
+        # история между turn'ами НУЖНА).
+        if os.environ.get("EVAL_CHAT_ISOLATION", "1").strip().lower() in (
+            "0", "false", "no", "",
+        ):
+            return
+
+        import urllib.request
+
+        def _post() -> int:
+            req = urllib.request.Request(
+                self._clear_url,
+                data=b"{}",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 — loopback control endpoint
+                return resp.status
+
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_post), timeout=15)
+        except Exception as exc:  # noqa: BLE001 — изоляция не должна валить прогон
+            logger.warning(
+                "chat-clear failed (%s) — диалоги могут контаминировать контекст",
+                exc,
+            )
 
     async def run(self, dialogue: dict) -> RunResult:
         import time as _time
@@ -349,6 +399,18 @@ class WSRunner:
         ts = int(_time.time())
         session_id = f"eval:{dialogue_id}_{ts}"
         msg_id = f"eval_msg_{dialogue_id}_{ts}"
+
+        # Изоляция диалогов (root-cause fix хвостовых timeout'ов).
+        # Все WS-диалоги идут в один серверный чат (chat_id=1), а
+        # `build_llm_messages` → `build_recent_sections` инжектит "Recent chat"
+        # из глобального chat.jsonl (хвост 1000) в КАЖДУЮ задачу. Без очистки
+        # контекст растёт на ~1-2k токенов/диалог → упор в soft_cap 200k →
+        # latency × loop-rounds взрывается → хвост уходит в timeout (испорченный
+        # 100-прогон v2.3.5: 43/100 timeout, концентрированы в хвосте). Очистка
+        # перед каждым диалогом держит контекст плоским и не даёт консолидатору
+        # сработать (порог 100 сообщений недостижим). См.
+        # docs/adr/0027-eval-dialogue-isolation.md.
+        await self._clear_chat_history()
 
         last_content = ""
         try:

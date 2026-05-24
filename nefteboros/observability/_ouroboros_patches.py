@@ -484,6 +484,8 @@ def _patch_llm_client_chat() -> None:
         logger.debug("LLMClient chat patch skipped: %s", exc)
         return
 
+    from nefteboros.observability.tracer import log_llm_usage
+
     original_async = LLMClient.chat_async
     original_sync = LLMClient.chat
 
@@ -580,6 +582,17 @@ def _patch_llm_client_chat() -> None:
                                 update_kwargs["output"] = msg
                             if update_kwargs:
                                 span.update(**update_kwargs)
+                            # JSONL-tracer fallback (scope #2): продублировать
+                            # cost/tokens в nefteboros _current_span — виден
+                            # offline без Langfuse-ключей (compute_cost знает
+                            # kimi/glm/GigaChat, Ouroboros pricing — нет → cost=0).
+                            # Guard: ошибка tracer'а не должна ронять chat, иначе
+                            # outer except пере-вызовет LLM (двойной счёт).
+                            try:
+                                if isinstance(usage, dict):
+                                    log_llm_usage(usage)
+                            except Exception:
+                                logger.debug("log_llm_usage JSONL fallback failed", exc_info=True)
                         return result
         except Exception:
             # Любая ошибка observability → fallback на raw call.
@@ -606,6 +619,12 @@ def _patch_llm_client_chat() -> None:
                                 update_kwargs["output"] = msg
                             if update_kwargs:
                                 span.update(**update_kwargs)
+                            # JSONL-tracer fallback (scope #2) — см. patched_async.
+                            try:
+                                if isinstance(usage, dict):
+                                    log_llm_usage(usage)
+                            except Exception:
+                                logger.debug("log_llm_usage JSONL fallback failed", exc_info=True)
                         return result
         except Exception:
             logger.debug("chat observability wrap failed; using raw")
