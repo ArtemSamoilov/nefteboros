@@ -201,7 +201,16 @@ base для производных — тоже anchored (в аффинной к
 - [x] Регресс сходимости (bear/base точно, bull ≤$0.04) — `test_forecast_flags.py`
 - [x] hormuz blocked→reopened ⇒ μ падает, 12m forecast едет вниз
 - [x] Инвариант bear<base<bull сохраняется
-- [x] AST-parse затронутых .py; 28 forecast unit-тестов зелёные (3.12)
+- [x] AST-parse затронутых .py. Тесты на Python 3.12 (`.venv312`):
+  - `pytest tests/test_forecast_flags.py -m "not network"` → **15 passed, 3 deselected**
+    (unit нового файла этого PR)
+  - со смежным forecast-регрессом
+    (`+ tests/test_ou_sigma_anchor.py + tests/test_forecast_reproducibility.py`) →
+    **28 passed, 9 deselected** — без регрессий
+  - `pytest tests/test_forecast_flags.py -m network` → **3 passed, 15 deselected**
+    (forecast() с flag_states end-to-end; spot из локального кеша `use_cache=True` —
+    Yahoo на live отдаёт 429, кеш делает прогон детерминированным и независимым от
+    rate-limit)
 
 ## Ссылки
 

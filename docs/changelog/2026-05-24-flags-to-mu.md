@@ -69,12 +69,19 @@ $89/$104, почему детерминированно а не LLM, огран�
 
 ## Тесты
 
-- `.venv312` (Python 3.12.12, как требует dev/prod parity): 28 forecast unit-тестов
-  зелёные (`test_forecast_flags.py` + `test_ou_sigma_anchor.py` +
-  `test_forecast_reproducibility.py`, `-m "not network"`).
-- AST-parse `scenarios.py` и `api.py` — OK.
-- Network-тесты (`-m network`, реальный fetch spot) не прогонялись локально —
-  отмечены маркером, требуют сети/данных.
+Python 3.12.12 (`.venv312`, dev/prod parity), точные числа:
+
+| Прогон | Результат |
+|---|---|
+| `pytest tests/test_forecast_flags.py -m "not network"` | 15 passed, 3 deselected |
+| `+ test_ou_sigma_anchor.py + test_forecast_reproducibility.py -m "not network"` | 28 passed, 9 deselected (без регрессий) |
+| `pytest tests/test_forecast_flags.py -m network` | 3 passed, 15 deselected |
+
+- Новый файл `test_forecast_flags.py` = 18 тестов (15 unit + 3 network).
+- AST-parse `scenarios.py`, `api.py`, `test_forecast_flags.py` — OK.
+- Network-тесты (`-m network`) — forecast() с flag_states end-to-end. Spot отдан из
+  локального кеша (`use_cache=True`); Yahoo на live-запрос даёт 429 (rate-limit),
+  кеш делает прогон детерминированным и независимым от лимита.
 
 ## Что НЕ в PR (отложено явно)
 
