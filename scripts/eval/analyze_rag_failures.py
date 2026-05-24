@@ -60,6 +60,10 @@ def classify(target_chunk_id: str, target_source_id: str, hits: list) -> str:
 
 
 def main() -> int:
+    # Windows: stdout по умолчанию cp1251, падает на unicode-bar/em-dash в принтах.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", default="v1")
     p.add_argument("--k-dense", type=int, default=30)
@@ -70,7 +74,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     log = logging.getLogger("analyze")
 
-    dataset = [json.loads(l) for l in (DATASETS_DIR / f"{args.version}.jsonl").read_text().splitlines() if l.strip()]
+    dataset = [json.loads(l) for l in (DATASETS_DIR / f"{args.version}.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     chunks_idx = load_chunks_index()
     log.info("Loaded %d Q + %d chunks", len(dataset), len(chunks_idx))
 
