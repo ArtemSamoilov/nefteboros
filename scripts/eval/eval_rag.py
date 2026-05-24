@@ -78,10 +78,17 @@ def main() -> int:
     p.add_argument(
         "--config",
         default="bi",
-        choices=["bi", "bi+rerank", "bi+topic-boost", "bi+topic-filter", "bi+doc-type", "bi+doc-type-boost"],
+        choices=[
+            "bi", "bi+rerank", "bi+topic-boost", "bi+topic-filter",
+            "bi+doc-type", "bi+doc-type-boost",
+            "bi+hybrid", "bi+hybrid-weighted",
+        ],
     )
     p.add_argument("--k-dense", type=int, default=30)
     p.add_argument("--k-final", type=int, default=10)
+    p.add_argument("--k-sparse", type=int, default=30, help="Глубина BM25 для hybrid")
+    p.add_argument("--rrf-k", type=int, default=60, help="Константа RRF для hybrid")
+    p.add_argument("--alpha", type=float, default=0.5, help="Вес dense в hybrid-weighted")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--out", help="Путь для метрик (default: metrics/runs/...)")
     args = p.parse_args()
@@ -101,6 +108,8 @@ def main() -> int:
     retriever = Retriever()
     rerank = args.config == "bi+rerank"
     topic_filter = "off"
+    hybrid = False
+    fusion = "rrf"
     if args.config == "bi+topic-boost":
         topic_filter = "boost"
     elif args.config == "bi+topic-filter":
@@ -109,10 +118,16 @@ def main() -> int:
         topic_filter = "doc-type"
     elif args.config == "bi+doc-type-boost":
         topic_filter = "doc-type-boost"
+    elif args.config == "bi+hybrid":
+        hybrid, fusion = True, "rrf"
+    elif args.config == "bi+hybrid-weighted":
+        hybrid, fusion = True, "weighted"
 
     log.info(
-        "Конфиг: %s | k_dense=%d k_final=%d | rerank=%s topic_filter=%s",
-        args.config, args.k_dense, args.k_final, rerank, topic_filter,
+        "Конфиг: %s | k_dense=%d k_final=%d k_sparse=%d | rerank=%s topic_filter=%s "
+        "hybrid=%s fusion=%s rrf_k=%d alpha=%.2f",
+        args.config, args.k_dense, args.k_final, args.k_sparse, rerank, topic_filter,
+        hybrid, fusion, args.rrf_k, args.alpha,
     )
 
     per_question_results: list[dict] = []
@@ -127,6 +142,11 @@ def main() -> int:
             k_final=args.k_final,
             rerank=rerank,
             topic_filter=topic_filter,
+            hybrid=hybrid,
+            fusion=fusion,
+            rrf_k=args.rrf_k,
+            alpha=args.alpha,
+            k_sparse=args.k_sparse,
         )
         chunk_ids = [h.chunk_id for h in hits]
         source_ids = [h.metadata.get("source_id", "") for h in hits]
@@ -185,6 +205,13 @@ def main() -> int:
         "overall": overall,
         "slices": slices,
     }
+    if hybrid:
+        metrics["hybrid"] = {
+            "fusion": fusion,
+            "k_sparse": args.k_sparse,
+            "rrf_k": args.rrf_k,
+            "alpha": args.alpha,
+        }
 
     out_path = Path(args.out) if args.out else (
         RUNS_DIR / f"{date.today().isoformat()}_rag_baseline_{args.config.replace('+','_')}_{get_git_commit()}.json"
