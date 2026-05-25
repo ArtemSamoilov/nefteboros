@@ -452,9 +452,9 @@ def retrieve(query, k_dense=30, k_final=5, rerank=False, topic_filter='off'):
 
 | # | Эксперимент | Ожидаемый эффект | Стоимость |
 |---|---|---|---|
-| 1 | **Manual eval dataset** (30-50 Q от человека, не знающего корпуса) | Корректная оценка doc-type filter, реальная prod-метрика. Может разблокировать включение doc-type в default | 2-3 часа Артёма |
+| 1 | **Manual eval dataset** (30-50 Q от человека, не знающего корпуса) | Корректная оценка doc-type filter + **гейт включения hybrid `auto` в prod-default** (ADR-0027 §7: ~25 живых RU-Q). Реальная prod-метрика | 2-3 часа Артёма |
 | 2 | **HyDE для RU** — kimi генерирует «гипотетический ответ» → эмбеддим его | +5-15 п.п. на RU chunk_hit@5 (сейчас 67% vs EN 85%) | 4-6 часов кода + eval |
-| 3 | **Hybrid BM25 + dense retrieval** — для точных терминов (тикеры, имена компаний, цифровые показатели) | +3-7 п.п. на финансовых/корпоративных запросах | 1 день |
+| 3 | ✅ **Hybrid BM25 + dense retrieval** — РЕАЛИЗОВАНО (ADR-0027, PR #79, `rag-hybrid-usage.md`). Routing RU→hybrid/EN→dense | **факт на v2: chunk_hit@5 0.779→0.832 (RRF) / 0.874 (routing), SAME_DOC_MISS −35%** | сделано |
 | 4 | **Fix chunker bug** — отслеживать bold/CAPS sub-headings внутри chunk'а, обновлять section_path | +5-10 п.п. (после ребилда chunks) | 4-6 часов + регенерация tagger |
 | 5 | **LLM-rerank через kimi** — замена bge-reranker-v2-m3 на сервере (не помещается в RAM) | precision boost для top-5, особенно на cross-doc | 3-4 часа |
 | 6 | **Polychunk ground truth** + recall@k метрика | Точнее метрика для AR с similar chunks | 1 день (требует разметки) |
