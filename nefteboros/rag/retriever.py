@@ -1,8 +1,12 @@
-"""Retriever — bi-encoder + cross-encoder reranker (этап 3, см. ADR-0016).
+"""Retriever — dense bi-encoder (+ опц. hybrid sparse, topic-filter, reranker).
 
-Двухэтапная схема:
+Базовая схема (этап 3, ADR-0016):
   1. BGE-M3 retrieval по Chroma → top-k_dense (default 30)
-  2. bge-reranker-v2-m3 cross-encoder → top-k_final (default 5)
+  2. bge-reranker-v2-m3 cross-encoder → top-k_final (default 5) [по умолчанию ВЫКЛ]
+
+Hybrid (sparse+dense, ADR-0027, по умолчанию ВЫКЛ):
+  1. dense top-k_dense (выше) + BM25 sparse top-k_sparse параллельно
+  2. слияние рангов (RRF default / weighted) → top-k_final
 
 API:
     retriever = Retriever.get()
@@ -19,8 +23,10 @@ from dataclasses import dataclass
 
 from nefteboros.observability._observe import observe
 from nefteboros.rag.embedder import Embedder
+from nefteboros.rag.fusion import reciprocal_rank_fusion, weighted_score_fusion
 from nefteboros.rag.query_classifier import QueryClassifier, topic_overlap_score
 from nefteboros.rag.schema import TopicTags
+from nefteboros.rag.sparse_index import SparseIndex
 from nefteboros.rag.store import SearchHit, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -52,6 +58,26 @@ TOPIC_BOOST_PER_MATCH = float(os.environ.get("NEFTEBOROS_TOPIC_BOOST", "0.05"))
 # Doc-type boost: один бинарный bonus за match (chunk type ∈ predicted query types).
 # Должен быть выше topic boost — type — более specific сигнал.
 DOC_TYPE_BOOST = float(os.environ.get("NEFTEBOROS_DOC_TYPE_BOOST", "0.10"))
+
+# Hybrid (sparse+dense) retrieval — см. ADR-0027. Режим NEFTEBOROS_HYBRID:
+#   "off"  — только dense (default, production-safe, как reranker);
+#   "on"   — всегда hybrid (для eval / глобального включения);
+#   "auto" — роутинг по языку запроса: RU → hybrid, EN → dense baseline.
+# "auto" ≥ baseline при ЛЮБОЙ доле EN (EN-ветка = baseline, ноль просадки;
+# выигрыш hybrid сконцентрирован на RU) — целевой prod-режим, но дефолт держим
+# "off" до подтверждения на живых RU-запросах. BM25-индекс in-memory (~13 МБ).
+_HYBRID_MODES = ("off", "on", "auto")
+DEFAULT_HYBRID_MODE = os.environ.get("NEFTEBOROS_HYBRID", "off").lower()
+if DEFAULT_HYBRID_MODE not in _HYBRID_MODES:
+    DEFAULT_HYBRID_MODE = "off"
+# Метод слияния: "rrf" (scale-free, default) | "weighted" (min-max norm + alpha).
+DEFAULT_HYBRID_FUSION = os.environ.get("NEFTEBOROS_HYBRID_FUSION", "rrf").lower()
+# Сглаживающая константа RRF (стандарт 60).
+DEFAULT_RRF_K = int(os.environ.get("NEFTEBOROS_HYBRID_RRF_K", "60"))
+# Вес dense в weighted-режиме (sparse получает 1-alpha).
+DEFAULT_HYBRID_ALPHA = float(os.environ.get("NEFTEBOROS_HYBRID_ALPHA", "0.5"))
+# Глубина sparse-списка для слияния.
+DEFAULT_K_SPARSE = int(os.environ.get("NEFTEBOROS_RETRIEVAL_K_SPARSE", "30"))
 
 
 @dataclass
@@ -117,11 +143,13 @@ class Retriever:
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
         query_classifier: QueryClassifier | None = None,
+        sparse_index: SparseIndex | None = None,
     ):
         self._store = store
         self._embedder = embedder
         self._reranker = reranker  # ленивая загрузка через .get() при первом retrieve
         self._classifier = query_classifier  # lazy
+        self._sparse_index = sparse_index  # lazy, только если hybrid=True
 
     @classmethod
     def get(cls) -> "Retriever":
@@ -150,6 +178,77 @@ class Retriever:
         if self._classifier is None:
             self._classifier = QueryClassifier.get()
         return self._classifier
+
+    @property
+    def sparse_index(self) -> SparseIndex:
+        if self._sparse_index is None:
+            self._sparse_index = SparseIndex.get()
+        return self._sparse_index
+
+    @staticmethod
+    def _use_hybrid(hybrid: bool | str, query: str) -> bool:
+        """Решает, применять ли hybrid к этому запросу.
+
+        bool — явное вкл/выкл (eval/тесты, имеет приоритет).
+        str  — режим: "on"/"true"/"1" → всегда; "auto" → роутинг по языку
+               (RU → hybrid, EN → dense baseline, через search/lang.py); иначе off.
+        """
+        if isinstance(hybrid, bool):
+            return hybrid
+        mode = hybrid.lower()
+        if mode == "auto":
+            from nefteboros.search.lang import detect_lang  # lazy: без heavy deps
+
+            return detect_lang(query) == "ru"
+        return mode in ("on", "true", "1")
+
+    def _hybrid_fuse(
+        self,
+        dense: list[SearchHit],
+        sparse: list,
+        *,
+        fusion: str,
+        rrf_k: int,
+        alpha: float,
+        top_k: int,
+        restrict_ids: set[str] | None = None,
+    ) -> list[SearchHit]:
+        """Сливает dense- и sparse-ранжирования в один список SearchHit.
+
+        restrict_ids — если задан (есть metadata-`where`), sparse-only чанки вне
+        этого множества отбрасываются: dense уже отфильтрован по `where`, и мы не
+        тащим обратно то, что фильтр отрезал. Без `where` sparse свободно
+        добавляет новых кандидатов.
+        """
+        if restrict_ids is not None:
+            sparse = [h for h in sparse if h.chunk_id in restrict_ids]
+        # id -> запись с text+metadata; dense выигрывает (полные Chroma-метаданные)
+        record: dict = {h.chunk_id: h for h in sparse}
+        for h in dense:
+            record[h.chunk_id] = h
+        if fusion == "weighted":
+            fused = weighted_score_fusion(
+                [(h.chunk_id, h.score) for h in dense],
+                [(h.chunk_id, h.score) for h in sparse],
+                alpha=alpha,
+            )
+        else:
+            fused = reciprocal_rank_fusion(
+                [[h.chunk_id for h in dense], [h.chunk_id for h in sparse]],
+                k=rrf_k,
+            )
+        out: list[SearchHit] = []
+        for chunk_id, score in fused[:top_k]:
+            src = record[chunk_id]
+            out.append(
+                SearchHit(
+                    chunk_id=chunk_id,
+                    score=score,
+                    text=src.text,
+                    metadata=src.metadata,
+                )
+            )
+        return out
 
     def _apply_topic_boost(
         self, candidates: list[SearchHit], query_tags: TopicTags, top_k: int
@@ -220,13 +319,22 @@ class Retriever:
         where: dict | None = None,
         rerank: bool = DEFAULT_RERANK,
         topic_filter: str = DEFAULT_TOPIC_FILTER,
+        hybrid: bool | str = DEFAULT_HYBRID_MODE,
+        fusion: str = DEFAULT_HYBRID_FUSION,
+        rrf_k: int = DEFAULT_RRF_K,
+        alpha: float = DEFAULT_HYBRID_ALPHA,
+        k_sparse: int = DEFAULT_K_SPARSE,
     ) -> list[RankedHit]:
-        """Pipeline: embed query → top-k_dense из Chroma → topic-filter (опц.) → rerank → top-k_final.
+        """Pipeline: embed query → top-k_dense из Chroma → (hybrid sparse-fusion) → topic-filter (опц.) → rerank → top-k_final.
 
         topic_filter:
             "off"    — не классифицируем query (default, нет +LLM latency)
             "boost"  — добавляем bonus к score за topic overlap
             "filter" — strict filter с fallback
+        hybrid:
+            bool — явное вкл/выкл (eval/тесты).
+            str  — режим "off" | "on" | "auto" (роутинг RU→hybrid / EN→dense).
+            При hybrid сливаем dense с BM25 sparse (fusion="rrf"|"weighted", ADR-0027).
         """
         q_emb = self.embedder.embed_query(query)
 
@@ -242,6 +350,20 @@ class Retriever:
         # Если post-filter включён, ретривим больше кандидатов для запаса
         pool_size = k_dense * 2 if topic_filter in ("boost", "filter", "doc-type-boost") else k_dense
         candidates = self.store.search(q_emb, k=pool_size, where=where)
+
+        # Hybrid: сливаем dense с BM25 sparse ДО topic-filter/rerank (ADR-0027).
+        # Режим "auto" роутит по языку запроса (RU→hybrid, EN→dense baseline).
+        if candidates and self._use_hybrid(hybrid, query):
+            sparse_hits = self.sparse_index.search(query, k=k_sparse)
+            candidates = self._hybrid_fuse(
+                candidates,
+                sparse_hits,
+                fusion=fusion,
+                rrf_k=rrf_k,
+                alpha=alpha,
+                top_k=pool_size,
+                restrict_ids={c.chunk_id for c in candidates} if where else None,
+            )
 
         # boost / filter / doc-type-boost — post-retrieval, требуют LLM call
         if topic_filter in ("boost", "filter") and candidates:

@@ -15,6 +15,11 @@ langchain-gigachat>=0.3.0         # LangChain wrapper над GigaChat (Sber). С
 chromadb>=0.5.0
 sentence-transformers>=3.0.0      # BGE-M3 и пр.
 PyMuPDF>=1.24.0                   # парсер PDF (fitz)
+# Hybrid sparse+dense retrieval (см. ADR-0027). Опциональны для dense-only прода
+# (NEFTEBOROS_HYBRID=off по умолчанию); нужны при NEFTEBOROS_HYBRID=on.
+rank_bm25>=0.2.2                  # BM25Okapi, чистый Python, in-memory ~13 МБ
+pymorphy3>=2.0.0                  # RU-лемматизация (нефти→нефть) для BM25-токенизации
+pymorphy3-dicts-ru>=2.4.0         # словарь OpenCorpora для pymorphy3
 
 # --- Forecast (см. ADR-0012) ---
 yfinance>=0.2.40                  # Brent/WTI/HH/TTF + DXY экзоген (futures, daily)
