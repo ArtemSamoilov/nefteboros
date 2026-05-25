@@ -394,38 +394,43 @@ def get_flags_for_scenario(scenario_name: ScenarioName) -> dict[str, str]:
 
 
 # =============================================================================
-# Flag-driven μ recomputation — детерминированная цепочка (ADR-0025)
+# Flag-driven μ recomputation — НЕПРЕРЫВНАЯ поверхность флаги→μ (ADR-0028)
 # =============================================================================
-# Делает геополитические флаги РЕАЛЬНЫМ детерминированным входом μ (а не только
-# текстом FLAGS_DECOMPOSITION). Цепочка:
+# Делает геополитические флаги РЕАЛЬНЫМ детерминированным входом μ. Цепочка:
 #
-#   состояния флагов → Σ Δmbpd (DRIVERS) → × (−$12/bbl Kilian) → μ_brent
-#   производные нефти (wti/urals/espo/blend) → аффинно от μ_brent
+#   состояния флагов → Σ Δmbpd (DRIVERS) → μ_asset (поверхность, anchored на base)
 #
-# μ считает ДЕТЕРМИНИРОВАННАЯ формула из экспертной таблицы — LLM здесь НЕ
-# участвует (классификация состояний флагов — отдельный этап/воркер).
+# μ считает ДЕТЕРМИНИРОВАННАЯ формула — LLM здесь НЕ участвует (классификация
+# состояний флагов из новостей — этап 2, nefteboros/forecast/web_flags/).
 #
-# base — особый случай: anchored к текущему equilibrium/споту (μ_base из
-# ASSET_PARAMS), НЕ «calm − дельты» (Σ=0 ⇒ возврат замороженной μ_base).
+# ADR-0028 заменил кусочно-разрывную цепочку этапа 1 (ADR-0025) на НЕПРЕРЫВНУЮ
+# поверхность, anchored на ЕДИНСТВЕННОЙ наблюдаемой точке — base μ (≈ spot):
 #
-# Полная карта решений, восстановление baseline и разрешение противоречия
-# калибровки ADR-0024 ($89 vs $104 baseline) — docs/adr/0025-flags-to-mu.md.
+#   balance ≥ 0 (де-эскалация): μ = μ_base − slope_deesc · balance   (база→bear)
+#   balance < 0 (эскалация):    μ = μ_base − slope_esc  · balance     (база→bull)
+#
+# Наклоны фитятся per-asset под замороженные μ пресетов (bear/base/bull из
+# ASSET_PARAMS), поэтому: (1) непрерывно в base (нет разрыва $98↔$89.2 этапа 1);
+# (2) монотонно (инвариант bear<base<bull держится); (3) три пресета
+# воспроизводятся ТОЧНО; (4) каждая нефть интерполирует СВОИ замороженные μ вдоль
+# общего supply-баланса — дифференциал (urals дисконт ширится с ценой) выходит
+# автоматически, без отдельной аффинной карты этапа 1.
+#
+# Эффективная эластичность brent ≈ $17/mbpd (≈ Kilian $12 supply + ~$5 репрайс
+# риск-премии) — для НОВОСТНОЙ реакции честнее «чистого» $12 на фиктивном calm-
+# якоре $89.2 этапа 1. Почему так разрешены артефакты 1-3 этапа 1, supersede
+# соответствующих пунктов ADR-0025 — docs/adr/0028-web-flags-snapshot.md.
 
 KILIAN_USD_PER_MBPD: float = 12.0
-"""Эластичность цены нефти к устойчивому supply-сдвигу (Kilian 2009).
+"""Референсная ЧИСТАЯ supply-эластичность цены нефти (Kilian 2009), USD/bbl·mbpd.
 
 # source: ADR-0023 §Q2 коридор $10–15/bbl per 1 mbpd; Goldman severe implicit
 # $12–13 ($115 vs $90 при +2 mbpd persistent loss); ADR-0024 §«Mapping flags».
-"""
 
-CALM_BASELINE_BRENT: float = 89.2
-"""Calm-baseline μ Brent (USD/bbl) — якорь цепочки для bear/bull.
-
-# source: ADR-0024 §«Mapping flags»: μ_bear = baseline − Σ·$12. Точное значение
-# = μ_bear(70) + 1.6·12 = 89.2 (ADR/ТЗ округляют до $89). Это фитируемый якорь
-# под сходимость bear, НЕ независимая «calm цена» (bear $70 ниже неё). base сюда
-# НЕ входит (anchored отдельно). См. ADR-0025 §«Восстановление baseline».
-"""
+NB (ADR-0028): поверхность флаги→μ НЕ использует это число напрямую — она
+anchored на наблюдаемой base μ, и эффективная эластичность brent выходит ~$17
+(= $12 supply + ~$5 репрайс риск-премии). $12 здесь — литературный референс/якорь
+для defensibility и кросс-ссылок ADR-0024/0025, а не множитель формулы."""
 
 OIL_ASSETS: frozenset[str] = frozenset(
     {"brent", "wti", "urals", "espo", "urals_minfin_blend"}
@@ -433,6 +438,21 @@ OIL_ASSETS: frozenset[str] = frozenset(
 """Активы с flag-driven μ — ТОЛЬКО нефть (v1). Газ (henry_hub/ttf) и equity
 (moexog/gazp/nvtk) сохраняют ручную калибровку ASSET_PARAMS: у них другая
 driver-логика (см. ADR-0025 §Non-goals)."""
+
+
+OIL_MU_FLOOR: float = 40.0
+OIL_MU_CEILING: float = 155.0
+"""Structural floor/ceiling нефтяной μ (USD/bbl) — hard safety-rail (ADR-0028).
+
+# source: ADR-0024 §«structural floor/ceiling»: cost-of-production floor $40-50
+# (OPEC defends, supply падает при прорыве вниз); demand-destruction ceiling
+# $120-150 (substitution/efficiency/recession при прорыве вверх).
+
+Rail взят чуть ШИРЕ soft-коридора (floor по нижней границе $40; ceiling $155, на
+~$5 выше $150), чтобы клэмпить ТОЛЬКО структурно невозможную экстраполяцию
+(full_closure→$183, full_reopen+full_lift→$24.5), не задевая ни пресеты (brent
+bull $120), ни near-preset комбинации. Глобальный для всех нефтей (консервативно;
+per-asset bounds — backlog). См. ADR-0028 §«Артефакт 4 — structural clamp»."""
 
 
 # Δmbpd к глобальному supply-demand БАЛАНСУ нефти относительно текущего/base
@@ -444,8 +464,11 @@ DRIVERS: dict[str, dict[str, float]] = {
         "blocked": 0.0,            # current/base reference   # source: ADR-0023 §Q2
         "partial_reopen": +1.5,    # source: ADR-0023 §Q2
         "full_reopen": +3.0,       # source: ADR-0023 §Q2
-        "partial_closure": -3.27,  # калибровано под сходимость μ_bull=$120 (ADR-0025):
-                                   # между −2 прозы и −5 таблицы ADR-0024 §Mapping (внутр. противоречие ADR)
+        "partial_closure": -2.0,   # source: ADR-0024 §Mapping проза «supply tightening ≈ −2» +
+                                   # FLAGS_DECOMPOSITION bull «partial_closure (−2 mbpd)». Честная физика:
+                                   # ADR-0028 снял reconciliation-затычку этапа 1 (−3.27) — bull теперь
+                                   # сходится через anchored эффективную эластичность (~$17), а не через
+                                   # контаминированную дельту драйвера. См. ADR-0028 §«Артефакт 1».
         "full_closure": -5.0,      # source: ADR-0023 §Q2 (what-if, не в bull-пресете)
     },
     "iran": {
@@ -481,7 +504,8 @@ DRIVER_BASE_STATES: dict[str, str] = {
 }
 
 # Преднастроенные наборы флагов, соответствующие ASSET_PARAMS scenarios.
-# base = current shock; bear = de-escalation (+1.6 mbpd); bull = escalation (−2.57).
+# base = current shock; bear = de-escalation (+1.6 mbpd); bull = escalation (−1.3 mbpd,
+# честная физика partial_closure=−2.0; ADR-0028 убрал −2.57 reconciliation этапа 1).
 FLAG_PRESETS: dict[ScenarioName, dict[str, str]] = {
     "base": dict(DRIVER_BASE_STATES),
     "bear": {
@@ -498,18 +522,6 @@ FLAG_PRESETS: dict[ScenarioName, dict[str, str]] = {
         "russia_cap": "tightened_dynamic",
         "china_demand": "weak",
     },
-}
-
-# Производные нефти: μ_asset = α·μ_brent + β (аффинно к chain-Brent). α,β
-# подогнаны под (bear, bull) замороженные μ → bear точно, bull ≤$0.05. Физика:
-# α<1 у urals/blend = санкционный дисконт ширится с ценой Brent ($8→$25). base
-# — anchored (особый случай), в аффинной карте не участвует.
-# # source: ASSET_PARAMS + spread-комментарии в ASSET_PARAMS (urals/espo/blend).
-_DERIVED_OIL_AFFINE: dict[str, tuple[float, float]] = {
-    "wti": (0.98, -2.6),                  # bear 70→66, bull 120→115 (~$5 premium)
-    "urals": (0.66, 15.8),                # bear 70→62, bull 120→95 (дисконт 8→25)
-    "espo": (0.96, -2.2),                 # bear 70→65, bull 120→113
-    "urals_minfin_blend": (0.72, 12.6),   # bear 70→63, bull 120→99 (≈0.78·urals+0.22·espo)
 }
 
 
@@ -537,19 +549,33 @@ def supply_balance_from_flags(flag_states: Mapping[str, str]) -> float:
     return total
 
 
+# Supply-баланс пресетов = позиции «узлов» поверхности на оси Σ Δmbpd (глобальный
+# шок общий для всех нефтей). bear ≈ +1.6 (профицит), bull ≈ −1.3 (дефицит, честная
+# физика partial_closure=−2.0). base = 0 по определению (точка отсчёта).
+_BEAR_PRESET_BALANCE: float = supply_balance_from_flags(FLAG_PRESETS["bear"])
+_BULL_PRESET_BALANCE: float = supply_balance_from_flags(FLAG_PRESETS["bull"])
+
+
 def compute_mu_from_flags(asset: str, flag_states: Mapping[str, str]) -> float:
     """Детерминированный пересчёт μ (long-run target) из состояний флагов.
 
-    Цепочка (ADR-0025): Σ Δmbpd (DRIVERS) → × (−Kilian) → μ_brent; производные
-    нефти аффинно от μ_brent. base (Σ=0) — anchored к ASSET_PARAMS (особый
-    случай, «не calm − дельты»).
+    Непрерывная поверхность (ADR-0028), anchored на наблюдаемой base μ:
+
+        balance ≥ 0 → μ = μ_base − (μ_base − μ_bear)/bear_balance · balance
+        balance < 0 → μ = μ_base − (μ_bull − μ_base)/(−bull_balance) · balance
+
+    где μ_bear/μ_base/μ_bull — замороженные μ пресетов из ASSET_PARAMS[asset].
+    Непрерывно в base (нет разрыва $98↔$89.2 этапа 1), монотонно (инвариант
+    bear<base<bull держится), три пресета воспроизводятся точно. Каждая нефть
+    интерполирует СВОИ μ вдоль общего supply-баланса — дифференциал (urals
+    дисконт ширится с ценой) выходит автоматически, без аффинной карты.
 
     Args:
         asset: один из OIL_ASSETS (ТОЛЬКО нефть в v1).
         flag_states: {driver: state}; неуказанные драйверы = base-состояние.
 
     Returns:
-        μ_0 (USD/bbl) для (asset, flag_states).
+        μ_0 (USD/bbl) для (asset, flag_states). balance==0 ⇒ замороженная μ_base.
 
     Raises:
         ValueError: asset не нефтяной, либо неизвестный driver/state.
@@ -559,15 +585,25 @@ def compute_mu_from_flags(asset: str, flag_states: Mapping[str, str]) -> float:
             f"compute_mu_from_flags поддерживает только нефть {sorted(OIL_ASSETS)}; "
             f"got {asset!r}. Газ/equity сохраняют ручную калибровку (ADR-0024)."
         )
+    params = ASSET_PARAMS[asset]
+    mu_bear, mu_base, mu_bull = (
+        params["bear"].mu_0,
+        params["base"].mu_0,
+        params["bull"].mu_0,
+    )
     balance = supply_balance_from_flags(flag_states)
-    # base equilibrium — anchored (особый случай, не через формулу):
-    if balance == 0.0:
-        return ASSET_PARAMS[asset]["base"].mu_0
-    mu_brent = CALM_BASELINE_BRENT - KILIAN_USD_PER_MBPD * balance
-    if asset == "brent":
-        return mu_brent
-    alpha, beta = _DERIVED_OIL_AFFINE[asset]
-    return alpha * mu_brent + beta
+    if balance >= 0.0:
+        # де-эскалация: base → bear по мере роста профицита (anchored на base)
+        slope = (mu_base - mu_bear) / _BEAR_PRESET_BALANCE
+    else:
+        # эскалация: base → bull по мере роста дефицита
+        slope = (mu_bull - mu_base) / (-_BULL_PRESET_BALANCE)
+    mu = mu_base - slope * balance
+    # Structural clamp (ADR-0028 §Артефакт 4): экстраполяция за пределы пресетов
+    # не должна пробивать cost-floor/demand-ceiling (ADR-0024). Клэмп В САМОЙ
+    # μ-функции, т.к. её зовут и в обход approve-gate/Δμ-cap (прямой вызов,
+    # ou_params_with_flag_mu). Пресеты внутри [floor, ceiling] — не затрагиваются.
+    return max(OIL_MU_FLOOR, min(OIL_MU_CEILING, mu))
 
 
 def ou_params_with_flag_mu(
@@ -608,10 +644,11 @@ __all__ = [
     "parse_scenario",
     "scenario_label",
     "get_flags_for_scenario",
-    # flag-driven μ chain (ADR-0025)
+    # flag-driven μ surface (ADR-0025 → непрерывная поверхность ADR-0028)
     "KILIAN_USD_PER_MBPD",
-    "CALM_BASELINE_BRENT",
     "OIL_ASSETS",
+    "OIL_MU_FLOOR",
+    "OIL_MU_CEILING",
     "DRIVERS",
     "DRIVER_BASE_STATES",
     "FLAG_PRESETS",

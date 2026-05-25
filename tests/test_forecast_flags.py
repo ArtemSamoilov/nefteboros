@@ -16,8 +16,9 @@ import pytest
 
 OIL = ("brent", "wti", "urals", "espo", "urals_minfin_blend")
 
-# Цепочка точна для bear/base, для bull аффинная карта даёт ≤$0.05 (round).
-_CONVERGENCE_TOL = 0.1
+# ADR-0028: per-asset base-anchored поверхность воспроизводит ВСЕ пресеты точно
+# (раньше bull через аффинную карту давал ≤$0.05).
+_CONVERGENCE_TOL = 1e-6
 
 
 # =============================================================================
@@ -43,42 +44,53 @@ class TestFlagChainConvergence:
                     f"(diff {chained - frozen:+.3f})"
                 )
 
-    def test_bear_headline_chain_exact(self):
-        """Headline-проверка ТЗ/ADR: brent bear = calm 89.2 − 1.6·$12 = $70.0 точно."""
+    def test_bear_preset_exact(self):
+        """ADR-0028 base-anchored поверхность воспроизводит bear ТОЧНО: brent → $70.0."""
         from nefteboros.forecast.scenarios import (
-            CALM_BASELINE_BRENT,
             FLAG_PRESETS,
-            KILIAN_USD_PER_MBPD,
             compute_mu_from_flags,
             supply_balance_from_flags,
         )
 
         s = supply_balance_from_flags(FLAG_PRESETS["bear"])
         assert s == pytest.approx(1.6)
-        assert CALM_BASELINE_BRENT - KILIAN_USD_PER_MBPD * s == pytest.approx(70.0)
         assert compute_mu_from_flags("brent", FLAG_PRESETS["bear"]) == pytest.approx(70.0)
 
-    def test_base_is_anchored_not_calm_baseline(self):
-        """base (Σ=0) → замороженная μ_base (anchored), НЕ calm_baseline (особый случай)."""
+    def test_base_anchored_and_continuous(self):
+        """base (Σ=0) → μ_base ($98), и поверхность НЕПРЕРЫВНА в base (ADR-0028, артефакты 2-3).
+
+        Этап 1 имел разрыв $98↔$89.2 в base (balance==0 спец-кейс) + инверсию знака:
+        малый ДЕФИЦИТ ронял μ к $91.6. Теперь малое отклонение даёт малый сдвиг μ в
+        ВЕРНОМ направлении, без скачка $8.8.
+        """
         from nefteboros.forecast.scenarios import (
             ASSET_PARAMS,
-            CALM_BASELINE_BRENT,
             FLAG_PRESETS,
             compute_mu_from_flags,
         )
 
-        mu = compute_mu_from_flags("brent", FLAG_PRESETS["base"])
-        assert mu == pytest.approx(ASSET_PARAMS["brent"]["base"].mu_0)  # 98, не 89.2
-        assert mu != pytest.approx(CALM_BASELINE_BRENT)
+        base_mu = ASSET_PARAMS["brent"]["base"].mu_0
+        assert compute_mu_from_flags("brent", FLAG_PRESETS["base"]) == pytest.approx(base_mu)
+        # малый дефицит (iran further_tightening, −0.2 mbpd) ⇒ μ чуть ВЫШЕ base,
+        # непрерывно; этап 1 ошибочно давал $91.6 (разрыв + инверсия направления).
+        near_deficit = compute_mu_from_flags("brent", {"iran": "further_tightening"})
+        assert near_deficit > base_mu
+        assert near_deficit == pytest.approx(base_mu + (120.0 - base_mu) / 1.3 * 0.2, abs=0.05)
 
-    def test_bull_balance_matches_reconciliation(self):
-        """bull Σ = −2.57 mbpd (single-baseline reconciliation, ADR-0025)."""
+    def test_bull_balance_honest_physics(self):
+        """bull Σ = −1.3 mbpd (ADR-0028 убрал reconciliation-затычку −2.57 этапа 1).
+
+        partial_closure вернулся к честной −2.0 (проза ADR-0024 / FLAGS_DECOMPOSITION
+        «−2 mbpd»); bull сходится через anchored эффективную эластичность, не дельту.
+        """
         from nefteboros.forecast.scenarios import (
+            DRIVERS,
             FLAG_PRESETS,
             supply_balance_from_flags,
         )
 
-        assert supply_balance_from_flags(FLAG_PRESETS["bull"]) == pytest.approx(-2.57)
+        assert DRIVERS["hormuz"]["partial_closure"] == pytest.approx(-2.0)
+        assert supply_balance_from_flags(FLAG_PRESETS["bull"]) == pytest.approx(-1.3)
 
 
 # =============================================================================
@@ -130,6 +142,54 @@ class TestHormuzReaction:
         mu_base = compute_mu_from_flags("brent", {"hormuz": "blocked"})
         mu_closed = compute_mu_from_flags("brent", {"hormuz": "full_closure"})
         assert mu_closed > mu_base
+
+
+# =============================================================================
+# Structural clamp — экстраполяция не пробивает floor/ceiling (ADR-0028 §Артефакт 4)
+# =============================================================================
+
+
+class TestStructuralClamp:
+    # Максимально экстремальные комбинации (за пределами bull/bear пресетов).
+    _MAX_SURPLUS = {
+        "hormuz": "full_reopen", "iran": "full_lift", "opec_plus": "accelerated",
+        "russia_cap": "removed", "china_demand": "weak",
+    }
+    _MAX_DEFICIT = {
+        "hormuz": "full_closure", "iran": "further_tightening", "china_demand": "strong",
+    }
+
+    def test_extreme_surplus_clamped_to_floor(self):
+        """full_reopen+full_lift+… → μ не пробивает cost-floor (без клэмпа было ~$24.5)."""
+        from nefteboros.forecast.scenarios import OIL_MU_FLOOR, compute_mu_from_flags
+
+        assert compute_mu_from_flags("brent", self._MAX_SURPLUS) == pytest.approx(OIL_MU_FLOOR)
+        for a in OIL:
+            assert compute_mu_from_flags(a, self._MAX_SURPLUS) >= OIL_MU_FLOOR
+
+    def test_extreme_deficit_clamped_to_ceiling(self):
+        """full_closure+… → μ не пробивает demand-ceiling (без клэмпа было ~$183)."""
+        from nefteboros.forecast.scenarios import OIL_MU_CEILING, compute_mu_from_flags
+
+        assert compute_mu_from_flags("brent", self._MAX_DEFICIT) == pytest.approx(OIL_MU_CEILING)
+        for a in OIL:
+            assert compute_mu_from_flags(a, self._MAX_DEFICIT) <= OIL_MU_CEILING
+
+    def test_presets_inside_clamp_unaffected(self):
+        """Все 15 пресетов внутри [floor, ceiling] — клэмп их не двигает (backward-compat)."""
+        from nefteboros.forecast.scenarios import (
+            ASSET_PARAMS,
+            FLAG_PRESETS,
+            OIL_MU_CEILING,
+            OIL_MU_FLOOR,
+            compute_mu_from_flags,
+        )
+
+        for a in OIL:
+            for s in ("bear", "base", "bull"):
+                mu = compute_mu_from_flags(a, FLAG_PRESETS[s])
+                assert OIL_MU_FLOOR < mu < OIL_MU_CEILING
+                assert mu == pytest.approx(ASSET_PARAMS[a][s].mu_0)
 
 
 # =============================================================================
