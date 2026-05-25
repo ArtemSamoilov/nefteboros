@@ -87,6 +87,10 @@ repo_bundle_manifest.json
 # Ouroboros runtime drive (state, memory, logs) — создаётся при первом запуске
 /data/ouroboros/
 
+# Web-flags калибровочные snapshot'ы (runtime: версии vNNNN.json + ACTIVE +
+# changelog.jsonl; μ выводится, не хранится). Создаётся при первом detect/apply (ADR-0028).
+/data/state/web_flags/
+
 # Кеш эмбеддингов
 .embeddings_cache/
 
