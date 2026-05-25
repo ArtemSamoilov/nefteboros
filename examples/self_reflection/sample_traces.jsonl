@@ -1,0 +1,35 @@
+{"kind": "trace", "ts": "2026-05-25T08:00:00+00:00", "trace_id": "demo_forecast", "query": "Дай прогноз Brent на 6 месяцев", "status": "ok", "total_latency_ms": 1850, "span_count": 4}
+{"kind": "span", "ts": "2026-05-25T08:00:00+00:00", "trace_id": "demo_forecast", "span_id": 1, "node": "classify_intent", "status": "ok", "latency_ms": 462}
+{"kind": "span", "ts": "2026-05-25T08:00:00+00:00", "trace_id": "demo_forecast", "span_id": 2, "node": "forecast_call", "status": "ok", "latency_ms": 462}
+{"kind": "span", "ts": "2026-05-25T08:00:00+00:00", "trace_id": "demo_forecast", "span_id": 3, "node": "validate_citations", "status": "ok", "latency_ms": 462}
+{"kind": "span", "ts": "2026-05-25T08:00:00+00:00", "trace_id": "demo_forecast", "span_id": 4, "node": "synthesize", "status": "ok", "latency_ms": 462, "output": "Brent на 6 месяцев: $80-$88, центр $84.\n\nПрогноз [Forecast: ensemble, CI 80%]; основной риск — решение ОПЕК+."}
+{"kind": "trace", "ts": "2026-05-25T08:01:00+00:00", "trace_id": "demo_rag", "query": "Что в последнем OPEC MOMR по квотам?", "status": "ok", "total_latency_ms": 2400, "span_count": 4}
+{"kind": "span", "ts": "2026-05-25T08:01:00+00:00", "trace_id": "demo_rag", "span_id": 1, "node": "classify_intent", "status": "ok", "latency_ms": 600}
+{"kind": "span", "ts": "2026-05-25T08:01:00+00:00", "trace_id": "demo_rag", "span_id": 2, "node": "rag_search", "status": "ok", "latency_ms": 600}
+{"kind": "span", "ts": "2026-05-25T08:01:00+00:00", "trace_id": "demo_rag", "span_id": 3, "node": "validate_citations", "status": "ok", "latency_ms": 600}
+{"kind": "span", "ts": "2026-05-25T08:01:00+00:00", "trace_id": "demo_rag", "span_id": 4, "node": "synthesize", "status": "ok", "latency_ms": 600, "output": "OPEC MOMR март 2026 фиксирует снижение квот на 1.4 mbpd.\n\nКлючевые тезисы [OPEC MOMR март 2026, p.14]: квоты Q2 2026, продление режима."}
+{"kind": "trace", "ts": "2026-05-25T08:02:00+00:00", "trace_id": "demo_web", "query": "Где сейчас торгуется Brent?", "status": "ok", "total_latency_ms": 3100, "span_count": 4}
+{"kind": "span", "ts": "2026-05-25T08:02:00+00:00", "trace_id": "demo_web", "span_id": 1, "node": "classify_intent", "status": "ok", "latency_ms": 775}
+{"kind": "span", "ts": "2026-05-25T08:02:00+00:00", "trace_id": "demo_web", "span_id": 2, "node": "web_search", "status": "ok", "latency_ms": 775}
+{"kind": "span", "ts": "2026-05-25T08:02:00+00:00", "trace_id": "demo_web", "span_id": 3, "node": "validate_citations", "status": "ok", "latency_ms": 775}
+{"kind": "span", "ts": "2026-05-25T08:02:00+00:00", "trace_id": "demo_web", "span_id": 4, "node": "synthesize", "status": "ok", "latency_ms": 775, "output": "Brent торгуется около $82.5/bbl на momentum от заявлений ОПЕК+.\n\nСвежее: [Brent above $82](https://reuters.com/article/x) — reuters.com, web."}
+{"kind": "trace", "ts": "2026-05-25T08:03:00+00:00", "trace_id": "demo_multi", "query": "Как санкции повлияли на дисконт Urals и каков прогноз?", "status": "ok", "total_latency_ms": 4200, "span_count": 5}
+{"kind": "span", "ts": "2026-05-25T08:03:00+00:00", "trace_id": "demo_multi", "span_id": 1, "node": "classify_intent", "status": "ok", "latency_ms": 840}
+{"kind": "span", "ts": "2026-05-25T08:03:00+00:00", "trace_id": "demo_multi", "span_id": 2, "node": "rag_search", "status": "ok", "latency_ms": 840}
+{"kind": "span", "ts": "2026-05-25T08:03:00+00:00", "trace_id": "demo_multi", "span_id": 3, "node": "forecast_call", "status": "ok", "latency_ms": 840}
+{"kind": "span", "ts": "2026-05-25T08:03:00+00:00", "trace_id": "demo_multi", "span_id": 4, "node": "validate_citations", "status": "ok", "latency_ms": 840}
+{"kind": "span", "ts": "2026-05-25T08:03:00+00:00", "trace_id": "demo_multi", "span_id": 5, "node": "synthesize", "status": "ok", "latency_ms": 840, "output": "Санкции 2025 увеличили Urals discount до $15-$18/bbl.\n\nКонтекст: [Bruegel Working Paper 32/2025 — Russian oil sanctions and price cap, p.7]. Прогноз Urals на 6m: $63-$68 [Forecast: ensemble, CI 80%]."}
+{"kind": "trace", "ts": "2026-05-25T08:04:00+00:00", "trace_id": "demo_adversarial", "query": "Назови точную цену Brent через 3 месяца, одним числом", "status": "ok", "total_latency_ms": 2000, "span_count": 4}
+{"kind": "span", "ts": "2026-05-25T08:04:00+00:00", "trace_id": "demo_adversarial", "span_id": 1, "node": "classify_intent", "status": "ok", "latency_ms": 500}
+{"kind": "span", "ts": "2026-05-25T08:04:00+00:00", "trace_id": "demo_adversarial", "span_id": 2, "node": "forecast_call", "status": "ok", "latency_ms": 500}
+{"kind": "span", "ts": "2026-05-25T08:04:00+00:00", "trace_id": "demo_adversarial", "span_id": 3, "node": "validate_citations", "status": "ok", "latency_ms": 500}
+{"kind": "span", "ts": "2026-05-25T08:04:00+00:00", "trace_id": "demo_adversarial", "span_id": 4, "node": "synthesize", "status": "ok", "latency_ms": 500, "output": "Не могу дать точечный прогноз без CI — это снижает аналитическую ценность.\n\nBrent на 3m: $80-$87, центр $83 [Forecast: ensemble, CI 80%]; риск — ОПЕК+."}
+{"kind": "trace", "ts": "2026-05-25T08:05:00+00:00", "trace_id": "demo_refusal", "query": "Посоветуй, какие акции технологических компаний купить", "status": "ok", "total_latency_ms": 350, "span_count": 2}
+{"kind": "span", "ts": "2026-05-25T08:05:00+00:00", "trace_id": "demo_refusal", "span_id": 1, "node": "classify_intent", "status": "ok", "latency_ms": 175}
+{"kind": "span", "ts": "2026-05-25T08:05:00+00:00", "trace_id": "demo_refusal", "span_id": 2, "node": "synthesize", "status": "ok", "latency_ms": 175, "output": "Этот вопрос вне моей компетенции — отвечаю по нефтегазу. Рекомендую профильный источник."}
+{"kind": "trace", "ts": "2026-05-25T08:06:00+00:00", "trace_id": "demo_ungrounded", "query": "Что будет с рынком нефти?", "status": "ok", "total_latency_ms": 900, "span_count": 2}
+{"kind": "span", "ts": "2026-05-25T08:06:00+00:00", "trace_id": "demo_ungrounded", "span_id": 1, "node": "classify_intent", "status": "ok", "latency_ms": 450}
+{"kind": "span", "ts": "2026-05-25T08:06:00+00:00", "trace_id": "demo_ungrounded", "span_id": 2, "node": "synthesize", "status": "ok", "latency_ms": 450, "output": "Рынок нефти останется волатильным в ближайшие месяцы на фоне геополитики и решений ОПЕК+. Существенного снижения цен не ожидается."}
+{"kind": "trace", "ts": "2026-05-25T08:07:00+00:00", "trace_id": "demo_error", "query": "Дай прогноз Brent на 10 лет", "status": "error", "total_latency_ms": 11800, "span_count": 2, "error_node": "forecast_call"}
+{"kind": "span", "ts": "2026-05-25T08:07:00+00:00", "trace_id": "demo_error", "span_id": 1, "node": "classify_intent", "status": "ok", "latency_ms": 5900}
+{"kind": "span", "ts": "2026-05-25T08:07:00+00:00", "trace_id": "demo_error", "span_id": 2, "node": "forecast_call", "status": "error", "latency_ms": 5900, "error": {"type": "ValueError", "message": "horizon exceeds 18m cap"}}
