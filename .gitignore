@@ -90,6 +90,10 @@ repo_bundle_manifest.json
 # Web-flags калибровочные snapshot'ы (runtime: версии vNNNN.json + ACTIVE +
 # changelog.jsonl; μ выводится, не хранится). Создаётся при первом detect/apply (ADR-0028).
 /data/state/web_flags/
+# Self-reflection backlog — рантайм-вывод рефлексии (ADR-0029); коммитим только
+# демо в examples/self_reflection/, не живой backlog
+/data/self_improvement/*.jsonl
+!/data/self_improvement/.gitkeep
 
 # Кеш эмбеддингов
 .embeddings_cache/
