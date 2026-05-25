@@ -40,7 +40,18 @@
 
 RU +17.5 п.п. (0.550→0.725), corporate +21.4 (0.429→0.643) на RRF.
 
-**Production-сравнение на v2-prefix (baseline 0.779) — pending пересборки индекса на GPU** (`run_hybrid_eval.sh`; локально v2-коллекция оказалась пустой, MPS-пересборка ~4ч).
+## Обновление 2026-05-25 — v2-цифры + language-routing
+
+Прогон на v2-prefix (GPU RTX 2070, commit `015e1bb`) + роутинг:
+
+| Конфиг | chunk_hit@5 | source_hit@5 |
+|---|---:|---:|
+| dense@v2 (baseline) | 0.779 | 0.989 |
+| +hybrid RRF (global) | 0.832 (+5.3) | 0.968 (−2.1) |
+| +hybrid weighted (global) | 0.863 (+8.4) | 0.979 |
+| **+hybrid auto (routing, prod-режим)** | **0.874** (+9.5) | **0.989** (=baseline) |
+
+SAME_DOC_MISS 21.1%→13.7% (−35%). Цена hybrid (EN-регрессия chunk_hit@5 −7.3 + source-эрозия) — **целиком EN**; роутинг (RU→hybrid, EN→dense; `NEFTEBOROS_HYBRID=auto`, детектор `search/lang.py`, 22/22 на доменных запросах) её устраняет и строго доминирует global-hybrid. Прод-дефолт остаётся `off` до подтверждения на живом human RU-сете. Детали — ADR-0027 §Результаты, `rag-hybrid-experiments.md` §3–4.
 
 ## Файлы
 
@@ -50,9 +61,9 @@ RU +17.5 п.п. (0.550→0.725), corporate +21.4 (0.429→0.643) на RRF.
 
 ## Тесты
 
-- `.venv` (Python 3.14): `pytest tests/test_rag_hybrid.py` — **13/13 зелёные** (6.4с). config=bi/hybrid не требует GigaChat, поэтому 3.14 ок для RAG-eval (в отличие от forecast/e2e — там `.venv312`).
+- `pytest tests/test_rag_hybrid.py` — **16 тестов зелёные** (14 passed + 2 sparse-skip без data/chunks в worktree; +3 language-routing `_use_hybrid`). config=bi/hybrid не требует GigaChat, 3.14 ок для RAG-eval.
 - AST-parse всех затронутых `.py` — OK.
-- `eval_rag.py --config bi / bi+hybrid / bi+hybrid-weighted` на v1 прогнаны (см. метрики выше).
+- `eval_rag.py --config bi / bi+hybrid / bi+hybrid-weighted / bi+hybrid-auto` прогнаны (v1 directional + v2 production + routing).
 
 ## Что НЕ в PR (отложено явно)
 

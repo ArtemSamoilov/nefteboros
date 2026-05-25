@@ -59,10 +59,17 @@ TOPIC_BOOST_PER_MATCH = float(os.environ.get("NEFTEBOROS_TOPIC_BOOST", "0.05"))
 # Должен быть выше topic boost — type — более specific сигнал.
 DOC_TYPE_BOOST = float(os.environ.get("NEFTEBOROS_DOC_TYPE_BOOST", "0.10"))
 
-# Hybrid (sparse+dense) retrieval — см. ADR-0027. По умолчанию ВЫКЛ
-# (production-safe, как reranker): включается NEFTEBOROS_HYBRID=on. BM25-индекс
-# in-memory (~13 МБ), без второй модели — помещается в 4 ГБ сервера.
-DEFAULT_HYBRID = os.environ.get("NEFTEBOROS_HYBRID", "off").lower() in ("on", "true", "1")
+# Hybrid (sparse+dense) retrieval — см. ADR-0027. Режим NEFTEBOROS_HYBRID:
+#   "off"  — только dense (default, production-safe, как reranker);
+#   "on"   — всегда hybrid (для eval / глобального включения);
+#   "auto" — роутинг по языку запроса: RU → hybrid, EN → dense baseline.
+# "auto" ≥ baseline при ЛЮБОЙ доле EN (EN-ветка = baseline, ноль просадки;
+# выигрыш hybrid сконцентрирован на RU) — целевой prod-режим, но дефолт держим
+# "off" до подтверждения на живых RU-запросах. BM25-индекс in-memory (~13 МБ).
+_HYBRID_MODES = ("off", "on", "auto")
+DEFAULT_HYBRID_MODE = os.environ.get("NEFTEBOROS_HYBRID", "off").lower()
+if DEFAULT_HYBRID_MODE not in _HYBRID_MODES:
+    DEFAULT_HYBRID_MODE = "off"
 # Метод слияния: "rrf" (scale-free, default) | "weighted" (min-max norm + alpha).
 DEFAULT_HYBRID_FUSION = os.environ.get("NEFTEBOROS_HYBRID_FUSION", "rrf").lower()
 # Сглаживающая константа RRF (стандарт 60).
@@ -177,6 +184,23 @@ class Retriever:
         if self._sparse_index is None:
             self._sparse_index = SparseIndex.get()
         return self._sparse_index
+
+    @staticmethod
+    def _use_hybrid(hybrid: bool | str, query: str) -> bool:
+        """Решает, применять ли hybrid к этому запросу.
+
+        bool — явное вкл/выкл (eval/тесты, имеет приоритет).
+        str  — режим: "on"/"true"/"1" → всегда; "auto" → роутинг по языку
+               (RU → hybrid, EN → dense baseline, через search/lang.py); иначе off.
+        """
+        if isinstance(hybrid, bool):
+            return hybrid
+        mode = hybrid.lower()
+        if mode == "auto":
+            from nefteboros.search.lang import detect_lang  # lazy: без heavy deps
+
+            return detect_lang(query) == "ru"
+        return mode in ("on", "true", "1")
 
     def _hybrid_fuse(
         self,
@@ -295,7 +319,7 @@ class Retriever:
         where: dict | None = None,
         rerank: bool = DEFAULT_RERANK,
         topic_filter: str = DEFAULT_TOPIC_FILTER,
-        hybrid: bool = DEFAULT_HYBRID,
+        hybrid: bool | str = DEFAULT_HYBRID_MODE,
         fusion: str = DEFAULT_HYBRID_FUSION,
         rrf_k: int = DEFAULT_RRF_K,
         alpha: float = DEFAULT_HYBRID_ALPHA,
@@ -308,7 +332,9 @@ class Retriever:
             "boost"  — добавляем bonus к score за topic overlap
             "filter" — strict filter с fallback
         hybrid:
-            True — сливаем dense с BM25 sparse (fusion="rrf"|"weighted", ADR-0027)
+            bool — явное вкл/выкл (eval/тесты).
+            str  — режим "off" | "on" | "auto" (роутинг RU→hybrid / EN→dense).
+            При hybrid сливаем dense с BM25 sparse (fusion="rrf"|"weighted", ADR-0027).
         """
         q_emb = self.embedder.embed_query(query)
 
@@ -326,7 +352,8 @@ class Retriever:
         candidates = self.store.search(q_emb, k=pool_size, where=where)
 
         # Hybrid: сливаем dense с BM25 sparse ДО topic-filter/rerank (ADR-0027).
-        if hybrid and candidates:
+        # Режим "auto" роутит по языку запроса (RU→hybrid, EN→dense baseline).
+        if candidates and self._use_hybrid(hybrid, query):
             sparse_hits = self.sparse_index.search(query, k=k_sparse)
             candidates = self._hybrid_fuse(
                 candidates,

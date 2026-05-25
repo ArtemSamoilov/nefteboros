@@ -81,7 +81,7 @@ def main() -> int:
         choices=[
             "bi", "bi+rerank", "bi+topic-boost", "bi+topic-filter",
             "bi+doc-type", "bi+doc-type-boost",
-            "bi+hybrid", "bi+hybrid-weighted",
+            "bi+hybrid", "bi+hybrid-weighted", "bi+hybrid-auto",
         ],
     )
     p.add_argument("--k-dense", type=int, default=30)
@@ -120,6 +120,8 @@ def main() -> int:
         topic_filter = "doc-type-boost"
     elif args.config == "bi+hybrid":
         hybrid, fusion = True, "rrf"
+    elif args.config == "bi+hybrid-auto":
+        hybrid, fusion = "auto", "rrf"  # роутинг по языку: RU→hybrid, EN→dense
     elif args.config == "bi+hybrid-weighted":
         hybrid, fusion = True, "weighted"
 

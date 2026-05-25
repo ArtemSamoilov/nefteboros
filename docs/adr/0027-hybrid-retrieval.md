@@ -50,9 +50,14 @@ Weighted-слияние (`alpha·norm(dense) + (1-alpha)·norm(sparse)`) реа�
 
 pymorphy3 — опциональная зависимость: при отсутствии деградируем до lower+токенизация (это «минимум» из ТЗ), логируем один раз. Латиница не лемматизируется (морфология лёгкая, dense несёт семантику).
 
-### 4. Флаг — `NEFTEBOROS_HYBRID=off` по умолчанию
+### 4. Режим `NEFTEBOROS_HYBRID` — `off` | `on` | `auto`; дефолт `off`
 
-Production-safe, ровно как reranker: новый путь не включается без явного `NEFTEBOROS_HYBRID=on`. Прод-дефолт не меняется до подтверждённых v2-цифр.
+Три режима:
+- **`off`** (default) — только dense, production-safe (как reranker, не включается без флага);
+- **`on`** — всегда hybrid (eval / глобальное включение);
+- **`auto`** — роутинг по языку запроса (`search/lang.py`): **RU → hybrid, EN → dense baseline**.
+
+`auto` — целевой production-режим. Ключевое свойство: **`auto` ≥ baseline при ЛЮБОЙ доле EN**, потому что EN-ветка = текущий dense baseline (нулевая просадка), а весь выигрыш hybrid сконцентрирован на RU (см. §Результаты, `source@5`-by-lang). Полное выключение строго доминируется роутингом — доля языка определяет лишь РАЗМЕР приза, а не «включать ли». Поэтому гейты прод-дефолта — не доля языка, а: (1) надёжность детекции языка (проверено, §Результаты); (2) подтверждение на живых RU-запросах. Дефолт держим `off` до (2). Остаточный риск роутинга — misroute EN→RU (тогда тот запрос съест EN-просадку); порог `lang.py` 0.3 склоняет к RU, что для нас безопасно — реальному EN-запросу нужно ≥30% кириллицы, чего не бывает.
 
 ## Архитектура
 
@@ -67,9 +72,9 @@ nefteboros/rag/
   retriever.py     — retrieve(..., hybrid, fusion, rrf_k, alpha, k_sparse):
                        dense pool + sparse → _hybrid_fuse → topic-filter? → rerank? → top-k
 scripts/eval/
-  eval_rag.py      — --config bi+hybrid / bi+hybrid-weighted (+ --k-sparse/--rrf-k/--alpha)
-  run_hybrid_eval.sh — сборка v2-индекса + before/after на машине с GPU
-tests/test_rag_hybrid.py — 13 тестов (токенизация, RRF-математика, fusion-glue, BM25 self-retrieval)
+  eval_rag.py      — --config bi+hybrid / bi+hybrid-weighted / bi+hybrid-auto (+ --k-sparse/--rrf-k/--alpha)
+  run_hybrid_eval.sh — сборка v2-индекса + before/after (+ routing) на машине с GPU
+tests/test_rag_hybrid.py — 16 тестов (токенизация, RRF-математика, fusion-glue, BM25 self-retrieval, language-routing)
 ```
 
 Слияние происходит ДО topic-filter/rerank: hybrid формирует пул кандидатов, остальной pipeline без изменений. При активном metadata-`where` sparse-only чанки (вне dense-пула) отбрасываются — dense уже отфильтрован по `where`, не тащим обратно отрезанное.
@@ -78,7 +83,7 @@ tests/test_rag_hybrid.py — 13 тестов (токенизация, RRF-мат
 
 | Переменная | Default | Назначение |
 |---|---|---|
-| `NEFTEBOROS_HYBRID` | `off` | вкл hybrid (`on`/`true`/`1`) |
+| `NEFTEBOROS_HYBRID` | `off` | режим: `off` \| `on` (всегда) \| `auto` (роутинг RU→hybrid, EN→dense) |
 | `NEFTEBOROS_HYBRID_FUSION` | `rrf` | `rrf` \| `weighted` |
 | `NEFTEBOROS_HYBRID_RRF_K` | `60` | константа RRF |
 | `NEFTEBOROS_HYBRID_ALPHA` | `0.5` | вес dense в weighted |
@@ -107,6 +112,7 @@ RU chunk_hit@5: dense 0.550 → RRF 0.725 (**+17.5**); corporate 0.429 → 0.643
 | dense@v2 (baseline) | **0.779** | 0.347 | 0.527 | 0.989 |
 | **+hybrid RRF** | **0.832** (+5.3) | 0.421 (+7.4) | 0.598 (+7.1) | 0.968 (−2.1) |
 | +hybrid weighted | 0.863 (+8.4) | 0.516 (+16.9) | 0.657 (+13.0) | 0.979 (−1.0) |
+| **+hybrid auto (routing)** | **0.874** (+9.5) | 0.389 | 0.582 | **0.989** (=baseline) |
 
 Слайсы `chunk_hit@5` (dense → RRF → weighted):
 
@@ -120,6 +126,8 @@ RU chunk_hit@5: dense 0.550 → RRF 0.725 (**+17.5**); corporate 0.429 → 0.643
 | 4_geopolitics (n=11) | 0.909 | 1.000 | +9.1 | 1.000 | +9.1 |
 
 **Headline:** hybrid RRF поднимает `chunk_hit@5` с production-baseline `0.779` до **`0.832` (+5.3 п.п.)** — цель достигнута. RRF остаётся production-default (см. §Ловушка); weighted даёт +8.4, но это симптом synthetic-bias'а, не сигнал переключать.
+
+**Routing (`auto`) — целевой prod-режим, строго доминирует:** `chunk_hit@5 = 0.874` (выше global-RRF 0.832 и weighted 0.863) при `source_hit@5 = 0.989` (recall документа восстановлен к baseline) — EN→dense (нулевая просадка), RU→hybrid. Детали и `source@5`-by-lang — `rag-hybrid-experiments.md` §4.
 
 **Гипотеза «на v2 прирост меньше, чем на v1» — НЕ подтвердилась.** Heading-prefix v2 **не закрыл** corporate-проблему: RRF здесь даёт +28.6 п.п. (на v1 было +21.4) — БОЛЬШЕ, чем на raw-dense. То же по RU: +22.5 на v2 против +17.5 на v1. BM25 и prefix целятся в один кейс (SAME_DOC_MISS), но прирост не вычитается — это **дополняющие сигналы**, не дублирующие.
 
@@ -151,7 +159,7 @@ RU chunk_hit@5: dense 0.550 → RRF 0.725 (**+17.5**); corporate 0.429 → 0.643
 ## Слабые места (саморазгром)
 
 - **`source_hit@5` под RRF просел и на v1, и на v2** (v1: 0.979 → 0.968; v2: 0.989 → 0.968): BM25 иногда поднимает чужой source с высоким лексическим overlap, вытесняя правильный. Малый эффект, но воспроизводимый между версиями prefix'а — следить при росте корпуса.
-- **Регрессия на «сильных» слайсах на v2** — EN −7.3 п.п., strategy −5.1, operational −11.8 (chunk_hit@5 под RRF). Цена за +28.6 на corporate. На v1 этой регрессии не было: heading-prefix поднял потолок dense на сильных слайсах, и BM25 теперь иногда лексически вытесняет правильный чанк. На текущем корпусе размер регрессии перекрывается ростом на слабых слайсах, но при росте en/strategy доли в реальном трафике гипотеза «hybrid выигрывает в среднем» может ослабнуть — нужен manual eval-сет.
+- **Регрессия на «сильных» слайсах на v2** — EN −7.3 п.п., strategy −5.1, operational −11.8 (chunk_hit@5 под RRF). Цена за +28.6 на corporate. На v1 этой регрессии не было: heading-prefix поднял потолок dense на сильных слайсах, и BM25 теперь иногда лексически вытесняет правильный чанк. На текущем корпусе размер регрессии перекрывается ростом на слабых слайсах. **→ Решено роутингом** (`NEFTEBOROS_HYBRID=auto`, §Решение.4): EN идёт на dense, поэтому доля EN на результат не влияет — routing ≥ baseline при любой доле, EN-регрессия и source-эрозия устранены (auto: `chunk_hit@5=0.874`, `source@5=0.989`). Manual RU-сет остаётся для подтверждения RU-выигрыша на живых данных.
 - **Стоп-листы и `len<2`-фильтр захардкожены** в `text_norm`. Для корпуса ок; вынос в конфиг — при необходимости.
 - **Кэш токенов инвалидируется по `(TOKENIZER_VERSION + id:len)`** — правка логики токенизации требует bump'а `TOKENIZER_VERSION`, иначе подхватится старый кэш. Задокументировано в коде.
 

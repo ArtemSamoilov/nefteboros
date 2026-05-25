@@ -164,3 +164,31 @@ def test_sparse_index_scores_descending(sparse_index):
     scores = [h.score for h in hits]
     assert scores == sorted(scores, reverse=True)
     assert all(s > 0 for s in scores), "должны возвращаться только score>0"
+
+
+# --------------------------------------------- language-routing (_use_hybrid)
+
+def test_use_hybrid_explicit_bool_wins():
+    """bool — явное вкл/выкл, имеет приоритет над режимами."""
+    from nefteboros.rag.retriever import Retriever
+
+    assert Retriever._use_hybrid(True, "что угодно") is True
+    assert Retriever._use_hybrid(False, "anything") is False
+
+
+def test_use_hybrid_modes_on_off():
+    from nefteboros.rag.retriever import Retriever
+
+    assert Retriever._use_hybrid("on", "x") is True
+    assert Retriever._use_hybrid("off", "x") is False
+    assert Retriever._use_hybrid("garbage", "x") is False  # неизвестный режим → off
+
+
+def test_use_hybrid_auto_routes_by_language():
+    """auto: RU-запрос (вкл. латинские тикеры) → hybrid; EN → dense baseline."""
+    from nefteboros.rag.retriever import Retriever
+
+    for ru in ("прогноз Brent на 2026", "стратегия Новатэка по СПГ", "цена Urals", "ОПЕК"):
+        assert Retriever._use_hybrid("auto", ru) is True, ru
+    for en in ("OPEC+ quota Q2 2026", "Brent forecast", "Gazprom EBITDA 2024", "LNG demand"):
+        assert Retriever._use_hybrid("auto", en) is False, en

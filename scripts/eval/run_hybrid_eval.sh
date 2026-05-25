@@ -43,6 +43,10 @@ echo "==> Шаг 4: HYBRID — weighted (аблация fusion)"
 python scripts/eval/eval_rag.py --version v1 --config bi+hybrid-weighted \
   --out "metrics/runs/${D}_rag_hybrid_weighted_${COMMIT}.json"
 
+echo "==> Шаг 4b: HYBRID — auto (роутинг RU→hybrid / EN→baseline) — целевой prod-режим"
+python scripts/eval/eval_rag.py --version v1 --config bi+hybrid-auto \
+  --out "metrics/runs/${D}_rag_hybrid_auto_${COMMIT}.json"
+
 echo "==> Шаг 5: failure analysis (CHUNK_HIT / SAME_DOC_MISS / CROSS_DOC_MISS)"
 python scripts/eval/analyze_rag_failures.py --version v1
 
